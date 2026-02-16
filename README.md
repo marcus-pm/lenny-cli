@@ -6,12 +6,14 @@ Ask natural-language questions across 303 episodes. Get cited answers with guest
 
 ## Features
 
+- **Automatic query routing** — fast RAG for targeted lookups, deep RLM for cross-episode synthesis
 - **Natural language queries** across 303 podcast transcripts
 - **Episode citations** with guest names, titles, and YouTube links
 - **Dual-model architecture** — Claude Opus 4.6 orchestrates via code, Claude Haiku 4.5 analyzes transcript chunks
+- **BM25 search index** — paragraph-level full-text search with disk caching for fast startup
 - **Real-time cost tracking** per query and per session
 - **Verbose mode** to watch the RLM orchestration (code generation, sub-LM calls, iteration steps)
-- **Slash commands** for session control (`/help`, `/episodes`, `/cost`, `/verbose`, `/quit`)
+- **Slash commands** for session control (`/help`, `/episodes`, `/cost`, `/mode`, `/verbose`, `/quit`)
 - **Session memory** for follow-up questions
 
 ## Prerequisites
@@ -20,55 +22,72 @@ Ask natural-language questions across 303 episodes. Get cited answers with guest
 - **Anthropic API key** — get one at [console.anthropic.com](https://console.anthropic.com/)
 - **Git** (for cloning with submodules)
 
-## Quick Start
+## Install
 
 ```bash
-# Clone with transcripts submodule
+# Option A (recommended): pipx for global `lenny` command
+pipx install "git+https://github.com/marcus-pm/lenny-cli.git"
+lenny
+```
+
+```bash
+# Option B: Homebrew tap install (global `lenny` command)
+brew tap marcus-pm/lenny-cli
+brew install lenny-cli
+lenny
+```
+
+```bash
+# Option C: from source
 git clone --recursive https://github.com/marcus-pm/lenny-cli.git
 cd lenny-cli
-
-# Option A: one-command setup
-make setup
-# Then edit .env and add your Anthropic API key
-
-# Option B: manual setup
 python3 -m venv .venv
 source .venv/bin/activate
 pip install .
-cp .env.example .env
-# Edit .env and add your Anthropic API key
+lenny
 ```
 
-> **Note:** The `--recursive` flag is required to pull the transcript submodule. If you already cloned without it, run `git submodule update --init`.
+> **First run:** If `ANTHROPIC_API_KEY` is missing, `lenny` prompts you for it and can save it to `~/.config/lenny/config.env`.
+>
+> **Submodule note:** For source installs, `--recursive` is required. If you already cloned without it, run `git submodule update --init`.
 
 ## Usage
 
 ```bash
-source .venv/bin/activate
 lenny
-```
-
-Or without activating the venv:
-
-```bash
-.venv/bin/lenny
 ```
 
 ### Example Session
 
 ```
-Lenny CLI — Explore Lenny's Podcast with RLM
+Lenny CLI — Explore Lenny's Podcast with RLM + RAG
 
 Ask questions about themes, patterns, and insights across 303 episodes.
+Queries are auto-routed: fast RAG for targeted lookups, deep RLM for synthesis.
+
+You: What did Brian Chesky say about founder mode?
+
+  → rag (specific guest lookup)
+  Searching transcripts...
+
+┌─ Lenny (RAG) ──────────────────────────────────────────┐
+│                                                         │
+│  Brian Chesky discussed founder mode in his episode...  │
+│  ...cited answer with YouTube links...                  │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+
+  Haiku: 1 calls, 5,200 in / 1,800 out tokens ($0.0114)
+  Query total: $0.0114 in 4.2s
 
 You: What frameworks do guests recommend for prioritization?
 
+  → rlm (multi-guest synthesis)
   Searching 303 episodes...
 
-┌─ Lenny ─────────────────────────────────────────────────┐
+┌─ Lenny (RLM) ──────────────────────────────────────────┐
 │                                                         │
 │  Several guests have shared prioritization frameworks:  │
-│                                                         │
 │  ...cited answer with YouTube links...                  │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
@@ -80,19 +99,47 @@ You: What frameworks do guests recommend for prioritization?
 
 ### Slash Commands
 
-| Command     | Description                                    |
-|-------------|------------------------------------------------|
-| `/help`     | Show help message                              |
-| `/episodes` | List loaded episodes (count + sample)          |
-| `/cost`     | Show session token usage and estimated cost    |
-| `/verbose`  | Toggle verbose mode (see RLM orchestration)    |
-| `/quit`     | Exit (also `/exit`, `/q`)                      |
+| Command        | Description                                     |
+|----------------|-------------------------------------------------|
+| `/help`        | Show help message                               |
+| `/episodes`    | List loaded episodes (count + sample)           |
+| `/cost`        | Show session token usage and estimated cost     |
+| `/mode`        | Show current routing mode                       |
+| `/mode auto`   | Automatic routing based on query (default)      |
+| `/mode rag`    | Force fast RAG path for all queries             |
+| `/mode rlm`    | Force deep RLM path for all queries             |
+| `/verbose`     | Toggle verbose mode (see RLM orchestration)     |
+| `/quit`        | Exit (also `/exit`, `/q`)                       |
 
 ## How It Works
 
-Lenny CLI uses the [RLM (Recursive Language Model)](https://github.com/alexzhang13/rlm) framework. A root LLM (Claude Opus 4.6) acts as an orchestrator that writes and executes Python code in a sandboxed REPL. It searches transcripts, extracts relevant sections using string operations, and dispatches focused analysis prompts to a sub-LLM (Claude Haiku 4.5). The root model iterates — up to 30 times per query — refining its approach until it can synthesize a comprehensive, cited answer.
+Lenny CLI uses two query paths, automatically selected based on the question:
 
-This is fundamentally different from stuffing transcripts into a single prompt. The root model *programs* its way to an answer, using code to filter 303 episodes down to the relevant passages before engaging the sub-LM.
+### RAG Path (fast, ~5-15s, ~$0.01)
+
+For targeted lookups like "What did Brian Chesky say about founder mode?":
+
+1. A BM25 search index finds the most relevant transcript paragraphs
+2. Top results are sent to Claude Haiku 4.5 for synthesis
+3. Single API call returns a cited answer
+
+### RLM Path (deep, ~30-120s, ~$0.15)
+
+For cross-episode synthesis like "What themes do guests disagree about?":
+
+1. Claude Opus 4.6 writes and executes Python code in a sandboxed REPL
+2. It searches transcripts, extracts sections, and dispatches analysis to Haiku 4.5
+3. The root model iterates (up to 30 times) to build a comprehensive answer
+
+### Query Routing
+
+The router uses a three-tier classifier:
+
+1. **Deterministic guardrails** for obvious RAG/RLM cases
+2. **LLM judge** (Haiku) for ambiguous queries
+3. **Conservative fallback** to RLM when uncertain
+
+Use `/mode rag` or `/mode rlm` to force a specific path.
 
 ## Cost
 
@@ -103,7 +150,7 @@ The app uses two Anthropic models with the following pricing (per million tokens
 | Claude Opus 4.6   | $5.00   | $25.00  |
 | Claude Haiku 4.5  | $0.80   | $4.00   |
 
-A typical query costs a few cents. Use `/cost` during a session to see running totals.
+RAG queries cost roughly $0.005-0.02. RLM queries cost roughly $0.10-0.25. Use `/cost` during a session to see running totals.
 
 ## Configuration
 
@@ -119,12 +166,18 @@ Set these in your `.env` file (see `.env.example`).
 ```
 lenny-cli/
 ├── src/lenny/
-│   ├── cli.py          # Chat loop and slash commands
-│   ├── engine.py       # RLM orchestration and system prompt
+│   ├── cli.py          # Chat loop, slash commands, routing dispatch
+│   ├── engine.py       # RLM orchestration, sandbox, system prompt
+│   ├── rag.py          # RAG engine (BM25 + single Haiku call)
+│   ├── router.py       # Hybrid router (guardrails + LLM judge + fallback)
+│   ├── search.py       # BM25 paragraph-level search index
 │   ├── data.py         # Transcript loading and indexing
 │   ├── costs.py        # Token usage and cost tracking
 │   ├── __main__.py     # python -m lenny entry point
 │   └── __init__.py
+├── tests/
+│   ├── test_sandbox.py # REPL sandbox regression tests
+│   └── test_router.py  # Router regression tests
 ├── transcripts/        # Git submodule — 303 episode transcripts
 ├── .env.example        # Template for API key
 ├── pyproject.toml      # Package metadata and dependencies

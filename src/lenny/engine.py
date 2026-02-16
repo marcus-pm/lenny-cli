@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 import textwrap
 import time
@@ -47,7 +48,7 @@ RETRY_BASE_DELAY = 5.0  # seconds — exponential backoff base for 429s
 
 
 # ---------------------------------------------------------------------------
-# Monkeypatch: throttled batched handler to avoid Tier 1 rate limits
+# Throttled batched handler — avoids Tier 1 rate limits
 # ---------------------------------------------------------------------------
 def _handle_batched_throttled(
     self: LMRequestHandler,
@@ -113,10 +114,315 @@ def _handle_batched_throttled(
     return LMResponse.batched_success_response(chat_completions=chat_completions)
 
 
-# Apply the monkeypatch
-LMRequestHandler._handle_batched = _handle_batched_throttled
+# ---------------------------------------------------------------------------
+# Lazy throttle patch — applied on first LennyEngine instantiation, not at
+# import time, so other code importing this module is unaffected.
+# ---------------------------------------------------------------------------
+_THROTTLE_APPLIED = False
 
 
+def _apply_throttle_patch() -> None:
+    """Apply the rate-limited batched handler to LMRequestHandler.
+
+    This is intentionally a process-wide monkeypatch because the RLM library
+    does not support dependency injection for the handler class.  We apply it
+    lazily (not at import time) so that importing lenny.engine for other
+    purposes does not trigger the side effect.
+    """
+    global _THROTTLE_APPLIED
+    if not _THROTTLE_APPLIED:
+        LMRequestHandler._handle_batched = _handle_batched_throttled
+        _THROTTLE_APPLIED = True
+
+
+# ---------------------------------------------------------------------------
+# REPL sandbox — restricts file access and dangerous imports
+# ---------------------------------------------------------------------------
+_BLOCKED_MODULES = frozenset({
+    "subprocess",       # shell command execution
+    "socket",           # raw network access
+    "http",             # HTTP client/server
+    "urllib",           # URL handling
+    "requests",         # popular HTTP library
+    "ftplib",           # FTP
+    "smtplib",          # SMTP
+    "xmlrpc",           # XML-RPC
+    "ctypes",           # C foreign function interface
+    "multiprocessing",  # process spawning
+    "signal",           # signal handling
+    "webbrowser",       # browser launching
+    "importlib",        # import machinery bypass
+    "posix",            # low-level POSIX syscalls (os.open bypass on Linux/macOS)
+    "nt",               # low-level Windows syscalls (os.open bypass on Windows)
+    "posixpath",        # rarely imported directly, but block for completeness
+    "ntpath",           # Windows path variant
+    "_io",              # C-level io implementation
+    "_posixsubprocess", # subprocess internals
+})
+
+
+def _make_restricted_open(allowed_dirs: list[str]):
+    """Create a restricted open() that only allows reading from specified directories.
+
+    This is the primary security control against prompt-injection attacks that
+    attempt to read sensitive files (e.g., ~/.ssh/id_rsa, ~/.env).
+    """
+    _real_open = builtins.open
+    resolved_dirs = [str(Path(d).resolve()) for d in allowed_dirs]
+
+    def restricted_open(file, mode="r", *args, **kwargs):
+        # Block all write modes
+        if any(c in str(mode) for c in ("w", "a", "x", "+")):
+            raise PermissionError(f"Write access is not allowed: {file}")
+
+        # Resolve the target path (follows symlinks, normalises ..)
+        target = str(Path(str(file)).resolve())
+
+        # Check the resolved path falls under an allowed directory
+        if not any(
+            target == allowed_dir or target.startswith(allowed_dir + os.sep)
+            for allowed_dir in resolved_dirs
+        ):
+            raise PermissionError(
+                f"Access denied: {file} is outside allowed directories"
+            )
+
+        return _real_open(file, mode, *args, **kwargs)
+
+    return restricted_open
+
+
+def _make_restricted_import(blocked: frozenset[str], restricted_open_fn):
+    """Create a restricted __import__ that blocks dangerous modules.
+
+    Blocks modules that enable shell execution, network access, or
+    system-level manipulation.  Returns sanitised proxies for modules
+    that contain file-access bypasses:
+
+    * ``os``      — strips os.open, os.read, os.system, os.popen, etc.
+    * ``io``      — replaces io.open / io.FileIO with the restricted open
+    * ``pathlib`` — replaces Path.read_text / read_bytes / write_* / open
+
+    Args:
+        blocked: Set of top-level module names to block entirely.
+        restricted_open_fn: The restricted open() to inject into io/pathlib.
+    """
+    _real_import = builtins.__import__
+    _proxy_cache: dict[str, object] = {}
+
+    def restricted_import(name, *args, **kwargs):
+        top_level = name.split(".")[0]
+        if top_level in blocked:
+            raise ImportError(
+                f"Import of '{name}' is not allowed in this environment. "
+                f"Module '{top_level}' is blocked for security."
+            )
+
+        module = _real_import(name, *args, **kwargs)
+
+        # Sanitised os — strip dangerous file I/O and process execution
+        if top_level == "os":
+            if "os" not in _proxy_cache:
+                real_os = module if name == "os" else _real_import("os")
+                _proxy_cache["os"] = _build_safe_os(real_os)
+            return _proxy_cache["os"]
+
+        # Sanitised io — replace io.open / io.FileIO
+        if top_level == "io":
+            if "io" not in _proxy_cache:
+                real_io = module if name == "io" else _real_import("io")
+                _proxy_cache["io"] = _build_safe_io(real_io, restricted_open_fn)
+            return _proxy_cache["io"]
+
+        # Sanitised pathlib — strip Path.read_text, read_bytes, write_*, open
+        if top_level == "pathlib":
+            if "pathlib" not in _proxy_cache:
+                real_pathlib = module if name == "pathlib" else _real_import("pathlib")
+                _proxy_cache["pathlib"] = _build_safe_pathlib(
+                    real_pathlib, restricted_open_fn,
+                )
+            return _proxy_cache["pathlib"]
+
+        return module
+
+    return restricted_import
+
+
+# ---------------------------------------------------------------------------
+# Safe os proxy
+# ---------------------------------------------------------------------------
+_OS_SAFE_ATTRS = frozenset({
+    # path utilities
+    "path", "sep", "altsep", "extsep", "pathsep", "curdir", "pardir",
+    "devnull", "linesep", "fspath",
+    # directory listing (read-only, non-sensitive when open() is restricted)
+    "listdir", "scandir", "walk", "fwalk",
+    "getcwd", "getcwdb",
+    "stat", "lstat", "fstat",
+    # environment (read-only access)
+    "environ", "getenv", "get_exec_path",
+    # constants & helpers used by standard library internals
+    "name", "supports_dir_fd", "supports_effective_ids",
+    "supports_fd", "supports_follow_symlinks",
+    "cpu_count", "getpid", "getppid", "getlogin", "getuid", "getgid",
+    "uname", "strerror", "urandom",
+    # commonly used by pathlib / other safe libs
+    "fsdecode", "fsencode",
+    "DirEntry",
+})
+
+
+def _build_safe_os(real_os):
+    """Return a proxy module that exposes only safe os attributes."""
+    import types
+
+    safe = types.ModuleType("os")
+    safe.__package__ = real_os.__package__
+    safe.__loader__ = getattr(real_os, "__loader__", None)
+    safe.__spec__ = getattr(real_os, "__spec__", None)
+
+    for attr in _OS_SAFE_ATTRS:
+        val = getattr(real_os, attr, None)
+        if val is not None:
+            setattr(safe, attr, val)
+
+    safe.path = real_os.path
+    return safe
+
+
+# ---------------------------------------------------------------------------
+# Safe io proxy
+# ---------------------------------------------------------------------------
+def _build_safe_io(real_io, restricted_open_fn):
+    """Return a copy of the io module with open/FileIO replaced."""
+    import types
+
+    safe = types.ModuleType("io")
+    safe.__package__ = real_io.__package__
+    safe.__loader__ = getattr(real_io, "__loader__", None)
+    safe.__spec__ = getattr(real_io, "__spec__", None)
+
+    # Copy everything first
+    for attr in dir(real_io):
+        if not attr.startswith("_"):
+            try:
+                setattr(safe, attr, getattr(real_io, attr))
+            except (AttributeError, TypeError):
+                pass
+
+    # Replace open with the restricted version
+    safe.open = restricted_open_fn
+
+    # Replace FileIO with a blocked version (low-level file descriptor open)
+    def _blocked_fileio(*args, **kwargs):
+        raise PermissionError("io.FileIO is not allowed in this environment")
+
+    safe.FileIO = _blocked_fileio
+
+    return safe
+
+
+# ---------------------------------------------------------------------------
+# Safe pathlib proxy
+# ---------------------------------------------------------------------------
+def _build_safe_pathlib(real_pathlib, restricted_open_fn):
+    """Return a copy of pathlib with Path file I/O methods restricted."""
+    import copy
+    import types
+
+    safe = types.ModuleType("pathlib")
+    safe.__package__ = real_pathlib.__package__
+    safe.__loader__ = getattr(real_pathlib, "__loader__", None)
+    safe.__spec__ = getattr(real_pathlib, "__spec__", None)
+
+    # Copy all module-level attributes
+    for attr in dir(real_pathlib):
+        if not attr.startswith("_"):
+            try:
+                setattr(safe, attr, getattr(real_pathlib, attr))
+            except (AttributeError, TypeError):
+                pass
+
+    # Create a restricted Path subclass
+    class RestrictedPath(real_pathlib.Path):
+        """Path subclass that routes file reads through the restricted open."""
+
+        def open(self, mode="r", *args, **kwargs):
+            return restricted_open_fn(str(self), mode, *args, **kwargs)
+
+        def read_text(self, encoding=None, errors=None):
+            kwargs = {}
+            if encoding is not None:
+                kwargs["encoding"] = encoding
+            if errors is not None:
+                kwargs["errors"] = errors
+            with restricted_open_fn(str(self), "r", **kwargs) as f:
+                return f.read()
+
+        def read_bytes(self):
+            with restricted_open_fn(str(self), "rb") as f:
+                return f.read()
+
+        def write_text(self, *args, **kwargs):
+            raise PermissionError(f"Write access is not allowed: {self}")
+
+        def write_bytes(self, *args, **kwargs):
+            raise PermissionError(f"Write access is not allowed: {self}")
+
+    # Also restrict PurePosixPath / PosixPath if they exist
+    safe.Path = RestrictedPath
+    if hasattr(real_pathlib, "PosixPath"):
+        safe.PosixPath = RestrictedPath
+    if hasattr(real_pathlib, "WindowsPath"):
+        safe.WindowsPath = RestrictedPath
+
+    return safe
+
+
+_SANDBOX_APPLIED = False
+
+
+def _apply_repl_sandbox(transcript_dir: str) -> None:
+    """Monkeypatch LocalREPL.setup() to inject restricted open/import.
+
+    After the original setup() builds the namespace we replace the builtins
+    with restricted versions that:
+      - Only allow reading files under the transcripts directory and the
+        REPL's own temp directory (used by load_context for JSON context).
+      - Block importing dangerous modules (subprocess, socket, http, …).
+
+    Must be called BEFORE any RLM.completion() call.
+    """
+    global _SANDBOX_APPLIED
+    if _SANDBOX_APPLIED:
+        return
+
+    from rlm.environments.local_repl import LocalREPL
+
+    _original_setup = LocalREPL.setup
+
+    def _sandboxed_setup(self):
+        _original_setup(self)
+
+        # Allowed dirs: transcripts + the REPL's temp dir (for context JSON)
+        allowed_dirs = [transcript_dir]
+        if hasattr(self, "temp_dir") and self.temp_dir:
+            allowed_dirs.append(self.temp_dir)
+
+        builtins_dict = self.globals["__builtins__"]
+        restricted_open_fn = _make_restricted_open(allowed_dirs)
+        builtins_dict["open"] = restricted_open_fn
+        builtins_dict["__import__"] = _make_restricted_import(
+            _BLOCKED_MODULES, restricted_open_fn,
+        )
+
+    LocalREPL.setup = _sandboxed_setup
+    _SANDBOX_APPLIED = True
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are a research assistant specialized in analyzing Lenny's Podcast transcripts. \
 You have access to a REPL environment with a catalog of podcast episodes and the ability \
@@ -152,6 +458,13 @@ with open(f"{{context['transcript_dir']}}/{{slug}}/transcript.md", "r") as f:
     transcript = f.read()
 print(transcript[:500])  # Preview
 ```
+
+## Security Restrictions
+
+File access is restricted to the transcripts directory only. You cannot read files \
+outside of the transcripts path. Write access is not available. Some Python modules \
+(subprocess, socket, http, urllib) are blocked. Use the available tools \
+(open, re, json, os.path) for transcript analysis.
 
 ## Rate Limit Awareness
 
@@ -252,9 +565,13 @@ class LennyEngine:
     def __init__(
         self,
         index: TranscriptIndex,
-        verbose: bool = True,
+        verbose: bool = False,
         max_iterations: int = 30,
     ):
+        # Apply runtime patches lazily (not at import time)
+        _apply_throttle_patch()
+        _apply_repl_sandbox(index.transcript_dir)
+
         self.index = index
         self.verbose = verbose
         self.max_iterations = max_iterations
@@ -291,6 +608,11 @@ class LennyEngine:
             verbose=verbose,
             persistent=False,  # We manage context ourselves per query
         )
+
+    @property
+    def api_key(self) -> str:
+        """Return the Anthropic API key (for shared use by RAGEngine)."""
+        return os.environ.get("ANTHROPIC_API_KEY", "")
 
     def query(self, question: str) -> tuple[str, QueryCost]:
         """Run a question through the RLM engine.

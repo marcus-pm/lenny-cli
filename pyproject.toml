@@ -17,7 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -26,9 +25,11 @@ classifiers = [
 ]
 dependencies = [
     "rlms>=0.1.0",
+    "anthropic>=0.75.0",
     "rich>=13.0.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.urls]

@@ -62,6 +62,46 @@ class SessionCosts:
         self.queries.append(query)
         return query
 
+    def add_raw_query_cost(self, query_cost: QueryCost) -> None:
+        """Register a pre-built QueryCost into session totals.
+
+        Used by the RAG path which builds QueryCost directly from
+        Anthropic API usage rather than going through RLM's UsageSummary.
+        """
+        for model_name, costs in query_cost.model_costs.items():
+            self.total_input_tokens += costs["input_tokens"]
+            self.total_output_tokens += costs["output_tokens"]
+        self.total_cost += query_cost.total_cost
+        self.queries.append(query_cost)
+
+
+def make_query_cost_from_usage(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    execution_time: float,
+) -> QueryCost:
+    """Create a QueryCost from raw Anthropic API usage (for RAG path).
+
+    Unlike ``SessionCosts.add_query()`` which takes an RLM UsageSummary,
+    this accepts raw token counts from a direct Anthropic API call.
+    """
+    pricing = MODEL_PRICING.get(model, DEFAULT_PRICING)
+    input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    return QueryCost(
+        model_costs={model: {
+            "calls": 1,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "total_cost": input_cost + output_cost,
+        }},
+        total_cost=input_cost + output_cost,
+        execution_time=execution_time,
+    )
+
 
 def format_query_cost(query: QueryCost) -> str:
     """Format a single query's cost for display."""
