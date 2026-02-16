@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lenny-cli"
+version = "0.1.0"
+description = "RLM-powered Lenny's Podcast transcript explorer"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Marcus" },
+]
+keywords = ["rlm", "llm", "podcast", "transcripts", "cli", "anthropic", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "rlms>=0.1.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/marcus-pm/lenny-cli"
+Repository = "https://github.com/marcus-pm/lenny-cli"
+Issues = "https://github.com/marcus-pm/lenny-cli/issues"
+
+[project.scripts]
+lenny = "lenny.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
