@@ -16,9 +16,20 @@ import time
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.spinner import Spinner
+from rich.style import Style
 from rich.text import Text
 
 from rlm.core.types import RLMIteration, RLMMetadata
+
+from lenny.style import (
+    AMBER,
+    CREAM,
+    CREAM_DIM,
+    GRAY_MUTED,
+    PROGRESS_LABELS,
+    SUCCESS_COLOR,
+    LennyTheme,
+)
 
 
 # Lines to skip when extracting status from REPL stdout
@@ -55,8 +66,10 @@ class ProgressDisplay:
         console: Console,
         *,
         initial_status: str = "Thinking...",
+        theme: LennyTheme | None = None,
     ) -> None:
         self.console = console
+        self._theme = theme
         self._iteration_count = 0
         self._start_time: float | None = None
         self._completed_steps: list[str] = []
@@ -124,13 +137,13 @@ class ProgressDisplay:
         """Derive a single human-readable status line from the iteration."""
         # Check if this is the final answer iteration
         if iteration.final_answer is not None:
-            return "Preparing answer..."
+            return PROGRESS_LABELS["preparing_answer"]
 
         # Check for FINAL() / FINAL_VAR() call in the LLM response
         if iteration.response and re.search(
             r"^\s*FINAL(?:_VAR)?\(", iteration.response, re.MULTILINE,
         ):
-            return "Preparing answer..."
+            return PROGRESS_LABELS["preparing_answer"]
 
         # Try to get a meaningful line from stdout
         stdout_line = self._best_stdout_line(iteration)
@@ -141,7 +154,9 @@ class ProgressDisplay:
         for cb in iteration.code_blocks:
             if cb.result.rlm_calls:
                 n = len(cb.result.rlm_calls)
-                return f"Analyzing {n} excerpt{'s' if n != 1 else ''}..."
+                return PROGRESS_LABELS["analyzing_excerpts"].format(
+                    n=n, s="s" if n != 1 else "",
+                )
 
         # Infer from code patterns
         for cb in iteration.code_blocks:
@@ -150,7 +165,7 @@ class ProgressDisplay:
                 return hint
 
         # Fallback
-        return "Thinking..."
+        return PROGRESS_LABELS["thinking"]
 
     def _best_stdout_line(self, iteration: RLMIteration) -> str | None:
         """Return the most informative stdout line from the iteration."""
@@ -176,16 +191,22 @@ class ProgressDisplay:
         """Build the multi-line display: completed steps + animated spinner."""
         parts: list[RenderableType] = []
 
-        # Completed steps (dim, with checkmark)
+        # Completed steps (checkmark + muted text)
         for step in self._completed_steps[-_MAX_COMPLETED:]:
-            parts.append(Text(f"  \u2713 {step}", style="dim"))
+            line = Text("  ")
+            line.append("\u2713 ", style=Style(color=SUCCESS_COLOR))
+            line.append(step, style=Style(color=CREAM_DIM))
+            parts.append(line)
 
         # Current step: spinner + status text + elapsed time
         status_text = Text()
-        status_text.append(self._current_status, style="bold")
-        status_text.append(f"  {self._elapsed()}", style="dim")
+        status_text.append(self._current_status, style=Style(color=CREAM, bold=True))
+        status_text.append(f"  {self._elapsed()}", style=Style(color=GRAY_MUTED))
 
-        spinner = Spinner("dots", text=status_text, style="cyan")
+        spinner_name = self._theme.spinner_style if self._theme else "dots"
+        spinner = Spinner(
+            spinner_name, text=status_text, style=Style(color=AMBER),
+        )
         # Wrap with indent
         parts.append(Text("  ", end=""))
         parts.append(spinner)
@@ -215,13 +236,13 @@ def _infer_from_code(code: str) -> str | None:
     """Infer a human-readable status from REPL code when stdout is empty."""
     low = code.lower()
     if "open(" in low and "transcript" in low:
-        return "Reading transcripts..."
+        return PROGRESS_LABELS["reading_transcripts"]
     if "llm_query_batched" in low:
-        return "Analyzing excerpts in parallel..."
+        return PROGRESS_LABELS["analyzing_parallel"]
     if "llm_query" in low:
-        return "Analyzing with AI..."
+        return PROGRESS_LABELS["analyzing_ai"]
     if "re.search" in low or "re.findall" in low:
-        return "Searching transcript text..."
+        return PROGRESS_LABELS["searching_text"]
     if "context[" in low and "catalog" in low:
-        return "Scanning episode catalog..."
+        return PROGRESS_LABELS["scanning_catalog"]
     return None

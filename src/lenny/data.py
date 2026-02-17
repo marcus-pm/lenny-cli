@@ -49,11 +49,11 @@ class TranscriptIndex:
         if transcript_dir is None:
             transcript_dir = _find_transcript_dir()
 
-        if not os.path.isdir(transcript_dir):
+        if transcript_dir is None or not os.path.isdir(transcript_dir):
             raise FileNotFoundError(
-                f"Transcripts directory not found: {transcript_dir}\n"
-                "Make sure you've cloned the submodule: "
-                "git submodule update --init"
+                "Transcript data not found.\n"
+                "Set the LENNY_TRANSCRIPTS environment variable to the episodes directory,\n"
+                "or run `lenny` interactively to download transcripts automatically."
             )
 
         index = cls(transcript_dir=transcript_dir)
@@ -167,7 +167,7 @@ class TranscriptIndex:
         }
 
 
-def _find_transcript_dir() -> str:
+def _find_transcript_dir() -> str | None:
     """Locate the transcripts/episodes directory.
 
     Search order:
@@ -175,6 +175,9 @@ def _find_transcript_dir() -> str:
     2. Walk up from this source file looking for transcripts/episodes/
        (works for editable installs and running from the repo)
     3. Walk up from cwd looking for transcripts/episodes/
+    4. Previously-downloaded transcripts in XDG data directory
+
+    Returns None if no transcript directory is found.
     """
     # 1. Explicit env var
     env_path = os.environ.get("LENNY_TRANSCRIPTS")
@@ -201,9 +204,16 @@ def _find_transcript_dir() -> str:
             break
         current = current.parent
 
-    # Fallback: best guess from source file
-    project_root = Path(__file__).resolve().parent.parent.parent
-    return str(project_root / "transcripts" / "episodes")
+    # 4. Check XDG data directory for downloaded transcripts
+    try:
+        from lenny.transcripts import transcript_data_dir
+        data_episodes = transcript_data_dir() / "episodes"
+        if data_episodes.is_dir():
+            return str(data_episodes)
+    except ImportError:
+        pass
+
+    return None
 
 
 def _parse_frontmatter(filepath: str) -> dict | None:

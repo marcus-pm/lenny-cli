@@ -15,82 +15,144 @@ from rich.text import Text
 
 from lenny.costs import format_query_cost, format_session_cost
 from lenny.data import TranscriptIndex
-from lenny.engine import LennyEngine
 from lenny.persist import format_terminal_citations, save_response_markdown
 from lenny.progress import ProgressDisplay
-from lenny.rag import RAGEngine
-from lenny.router import QueryMode, RouteDecision, classify_query
 from lenny.search import TranscriptSearchIndex
+from lenny.style import (
+    DEFAULT_THEME,
+    GOODBYE_TEXT,
+    HELP_TEXT,
+    PROGRESS_LABELS,
+    THEMES,
+    LennyTheme,
+    answer_panel_params,
+    build_splash_card,
+    format_cost_compact,
+    format_route_badge,
+    format_save_confirmation,
+)
 
-console = Console()
-
-WELCOME = """\
-[bold]Lenny CLI[/bold] — Explore Lenny's Podcast with fast + research modes
-
-Ask questions about themes, patterns, and insights across {count} episodes.
-Queries are auto-routed: fast mode for targeted lookups, research mode for synthesis.
-
-Commands: /help /episodes /cost /mode /verbose /quit
-"""
-
-HELP_TEXT = """\
-[bold]Commands[/bold]
-  /help      Show this help message
-  /episodes  List loaded episodes (count + sample)
-  /cost      Show session token usage and cost
-  /mode      Show or set routing mode (auto, fast, research)
-  /verbose   Toggle verbose mode (see research orchestration)
-  /quit      Exit
-
-[bold]Routing modes[/bold]
-  /mode auto      Automatic routing based on query (default)
-  /mode fast      Force fast path for all queries
-  /mode research  Force research path for all queries
-
-[bold]Example queries[/bold]
-  What did Brian Chesky say about founder mode?          → [dim]fast[/dim]
-  What frameworks do guests recommend for prioritization? → [dim]research[/dim]
-  Which guests disagree with each other on hiring?        → [dim]research[/dim]
-  Find the quote about 'disagree and commit'              → [dim]fast[/dim]
-"""
+_initial_theme = THEMES[DEFAULT_THEME]
+console = Console(theme=_initial_theme.to_rich_theme())
 
 
 def main():
     """Entry point for the lenny CLI."""
+    # Handle --version before any heavy imports or loading
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        from importlib.metadata import version
+        print(f"lenny {version('lenny-cli')}")
+        sys.exit(0)
+
+    # Deferred heavy imports — keeps --version fast (no anthropic SDK or rlms loaded
+    # until the user actually runs the app).
+    from lenny.engine import LennyEngine
+    from lenny.rag import RAGEngine
+    from lenny.router import QueryMode, RouteDecision, classify_query
+
+    # ---------------------------------------------------------------------------
+    # Helpers that reference QueryMode — nested here so the deferred import above
+    # is in scope at runtime (they are only ever called from within main()).
+    # ---------------------------------------------------------------------------
+
+    def _handle_mode_command(
+        cmd_parts: list[str],
+        current_mode: QueryMode | None,
+    ) -> QueryMode | None:
+        """Handle the /mode slash command. Returns the new forced mode."""
+        if len(cmd_parts) == 1:
+            mode_name = current_mode.value if current_mode else "auto"
+            console.print(f"  Routing mode: [accent]{mode_name}[/accent]")
+            return current_mode
+
+        arg = cmd_parts[1]
+        if arg == "auto":
+            console.print("  Routing mode: [accent]auto[/accent] (queries routed automatically)")
+            return None
+        elif arg in ("fast", "rag"):
+            console.print("  Routing mode: [accent]fast[/accent] (all queries use fast path)")
+            return QueryMode.FAST
+        elif arg in ("research", "rlm"):
+            console.print("  Routing mode: [accent]research[/accent] (all queries use research path)")
+            return QueryMode.RESEARCH
+        else:
+            console.print(f"  Unknown mode: {arg}. Options: auto, fast, research")
+            return current_mode
+
+    def _handle_theme_command(
+        cmd_parts: list[str],
+        current_theme: LennyTheme,
+        theme_pushed: bool,
+    ) -> tuple[LennyTheme, bool]:
+        """Handle /theme [name]. Returns (new_theme, theme_pushed)."""
+        if len(cmd_parts) == 1:
+            names = ", ".join(THEMES.keys())
+            console.print(f"  Theme: [accent]{current_theme.name}[/accent] (options: {names})")
+            return current_theme, theme_pushed
+
+        name = cmd_parts[1].lower()
+        if name not in THEMES:
+            names = ", ".join(THEMES.keys())
+            console.print(f"  Unknown theme: {name}. Options: {names}")
+            return current_theme, theme_pushed
+
+        new_theme = THEMES[name]
+
+        # Pop the previous pushed theme to avoid stacking
+        if theme_pushed:
+            console.pop_theme()
+
+        console.push_theme(new_theme.to_rich_theme())
+        console.print(f"  Theme: [accent]{new_theme.name}[/accent]")
+        return new_theme, True
+
+    # ---------------------------------------------------------------------------
+
     console.print()
+
+    current_theme = THEMES[DEFAULT_THEME]
+    _theme_pushed = False  # tracks whether we've pushed a theme on top
 
     config_path = _load_user_config_env()
     try:
         _ensure_api_key(config_path)
     except EnvironmentError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[error]Error:[/error] {e}")
         sys.exit(1)
 
-    # Load transcripts
-    with console.status("[bold]Loading transcripts..."):
+    # Find or download transcripts, then load index
+    from lenny.transcripts import ensure_transcripts  # noqa: E402
+
+    try:
+        transcript_dir = ensure_transcripts(console)
+    except FileNotFoundError as e:
+        console.print(f"[error]Error:[/error] {e}")
+        sys.exit(1)
+
+    with console.status("[accent]Loading transcripts...[/accent]"):
         try:
-            index = TranscriptIndex.load()
+            index = TranscriptIndex.load(transcript_dir)
         except FileNotFoundError as e:
-            console.print(f"[red]Error:[/red] {e}")
+            console.print(f"[error]Error:[/error] {e}")
             sys.exit(1)
 
-    console.print(f"  Loaded [bold]{len(index.episodes)}[/bold] episodes")
+    console.print(f"  [success]\u2713[/success] {len(index.episodes)} episodes loaded")
 
     # Build BM25 search index (cached to disk after first build)
     cache_path = os.path.join(
-        os.path.dirname(index.transcript_dir), ".cache", "bm25_index.pkl",
+        os.path.dirname(index.transcript_dir), ".cache", "bm25_index.json",
     )
-    with console.status("[bold]Loading search index..."):
+    with console.status("[accent]Loading search index...[/accent]"):
         search_index = TranscriptSearchIndex.load_or_build(index, cache_path)
 
-    console.print(f"  Search index: [bold]{len(search_index.chunks):,}[/bold] chunks")
+    console.print(f"  [success]\u2713[/success] {len(search_index.chunks):,} chunks indexed")
     console.print()
 
     # Initialize engines
     try:
         engine = LennyEngine(index=index, verbose=False)
     except EnvironmentError as e:
-        console.print(f"[red]Error:[/red] {e}")
+        console.print(f"[error]Error:[/error] {e}")
         sys.exit(1)
 
     rag_engine = RAGEngine(
@@ -100,14 +162,23 @@ def main():
 
     verbose = False
     forced_mode: QueryMode | None = None  # None = auto
-    console.print(WELCOME.format(count=len(index.episodes)))
+
+    # Splash card (replaces plain WELCOME text)
+    active_mode_label = "auto"
+    splash = build_splash_card(
+        episode_count=len(index.episodes),
+        active_mode=active_mode_label,
+        theme=current_theme,
+        console=console,
+    )
+    console.print(splash)
 
     # Chat loop
     while True:
         try:
-            query = console.input("[bold green]You:[/bold green] ").strip()
+            query = console.input("[prompt]You:[/prompt] ").strip()
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Goodbye![/dim]")
+            console.print(f"\n[faint]{GOODBYE_TEXT}[/faint]")
             break
 
         if not query:
@@ -118,7 +189,7 @@ def main():
             cmd_parts = query.lower().split()
             cmd = cmd_parts[0]
             if cmd in ("/quit", "/exit", "/q"):
-                console.print("[dim]Goodbye![/dim]")
+                console.print(f"[faint]{GOODBYE_TEXT}[/faint]")
                 break
             elif cmd == "/help":
                 console.print(HELP_TEXT)
@@ -132,11 +203,16 @@ def main():
             elif cmd == "/mode":
                 forced_mode = _handle_mode_command(cmd_parts, forced_mode)
                 continue
+            elif cmd == "/theme":
+                current_theme, _theme_pushed = _handle_theme_command(
+                    cmd_parts, current_theme, _theme_pushed,
+                )
+                continue
             elif cmd == "/verbose":
                 verbose = not verbose
                 engine.verbose = verbose
                 engine.rlm.verbose = verbose
-                console.print(f"  Verbose mode: [bold]{'on' if verbose else 'off'}[/bold]")
+                console.print(f"  Verbose mode: [accent]{'on' if verbose else 'off'}[/accent]")
                 continue
             else:
                 console.print(f"  Unknown command: {cmd}. Type /help for options.")
@@ -154,13 +230,15 @@ def main():
 
         console.print()
         mode_label = "fast" if route.mode == QueryMode.FAST else "research"
-        console.print(f"  [dim]→ {mode_label} ({route.reason})[/dim]")
+        console.print(format_route_badge(mode_label, route.reason, current_theme))
 
         # Execute via the appropriate path
         try:
             if route.mode == QueryMode.FAST:
                 with ProgressDisplay(
-                    console, initial_status="Searching transcripts...",
+                    console,
+                    initial_status=PROGRESS_LABELS["searching_transcripts"],
+                    theme=current_theme,
                 ):
                     answer, query_cost = rag_engine.query(
                         query, engine.conversation_history,
@@ -174,12 +252,15 @@ def main():
             else:
                 # Research path
                 if verbose:
-                    console.print(f"[dim]  Searching {len(index.episodes)} episodes...[/dim]\n")
+                    console.print(f"[faint]  Searching {len(index.episodes)} episodes...[/faint]\n")
                     answer, query_cost = engine.query(query)
                 else:
                     progress = ProgressDisplay(
                         console,
-                        initial_status=f"Searching {len(index.episodes)} episodes...",
+                        initial_status=PROGRESS_LABELS["searching_episodes"].format(
+                            n=len(index.episodes),
+                        ),
+                        theme=current_theme,
                     )
                     engine.rlm.logger = progress
                     try:
@@ -191,28 +272,25 @@ def main():
                 if engine.conversation_history:
                     engine.conversation_history[-1]["mode"] = "research"
         except KeyboardInterrupt:
-            console.print("\n[dim]Query interrupted.[/dim]")
+            console.print("\n[faint]Query interrupted.[/faint]")
             continue
         except Exception as e:
-            console.print(f"\n[red]Error:[/red] {e}")
+            console.print(f"\n[error]Error:[/error] {e}")
             continue
 
         # Display answer (with terminal-friendly citation URLs)
         terminal_answer = format_terminal_citations(answer)
         console.print()
-        border = "cyan" if route.mode == QueryMode.FAST else "blue"
-        title_suffix = " [dim](fast)[/dim]" if route.mode == QueryMode.FAST else " [dim](research)[/dim]"
+        panel_kw = answer_panel_params(mode_label, current_theme)
         console.print(Panel(
             Markdown(terminal_answer),
-            title=f"[bold]Lenny[/bold]{title_suffix}",
-            border_style=border,
-            padding=(1, 2),
+            **panel_kw,
         ))
 
         # Display cost
         cost_str = format_query_cost(query_cost)
         console.print()
-        console.print(Text(cost_str, style="dim"))
+        console.print(format_cost_compact(cost_str))
 
         # Save response to timestamped Markdown file
         try:
@@ -222,57 +300,31 @@ def main():
                 mode=mode_label,
                 cost_summary=cost_str,
             )
-            console.print(f"  [dim]Saved response: {saved.name}[/dim]")
+            console.print(format_save_confirmation(saved.name))
         except Exception:
-            console.print("  [dim yellow]Warning: could not save response file.[/dim yellow]")
+            console.print("  [warning]Could not save response file.[/warning]")
 
         console.print()
 
 
-def _handle_mode_command(
-    cmd_parts: list[str],
-    current_mode: QueryMode | None,
-) -> QueryMode | None:
-    """Handle the /mode slash command. Returns the new forced mode."""
-    if len(cmd_parts) == 1:
-        # Show current mode
-        mode_name = current_mode.value if current_mode else "auto"
-        console.print(f"  Routing mode: [bold]{mode_name}[/bold]")
-        return current_mode
-
-    arg = cmd_parts[1]
-    if arg == "auto":
-        console.print("  Routing mode: [bold]auto[/bold] (queries routed automatically)")
-        return None
-    elif arg in ("fast", "rag"):
-        console.print("  Routing mode: [bold]fast[/bold] (all queries use fast path)")
-        return QueryMode.FAST
-    elif arg in ("research", "rlm"):
-        console.print("  Routing mode: [bold]research[/bold] (all queries use research path)")
-        return QueryMode.RESEARCH
-    else:
-        console.print(f"  Unknown mode: {arg}. Options: auto, fast, research")
-        return current_mode
-
-
 def _show_episodes(index: TranscriptIndex):
     """Show episode count and a sample."""
-    console.print(f"\n  [bold]{len(index.episodes)}[/bold] episodes loaded\n")
+    console.print(f"\n  [accent]{len(index.episodes)}[/accent] episodes loaded\n")
     sample = list(index.episodes.values())[:10]
     for ep in sample:
-        console.print(f"  [dim]{ep.publish_date}[/dim]  {ep.guest} — {ep.title}")
+        console.print(f"  [faint]{ep.publish_date}[/faint]  {ep.guest} \u2014 [dim]{ep.title}[/dim]")
     if len(index.episodes) > 10:
-        console.print(f"  [dim]... and {len(index.episodes) - 10} more[/dim]")
+        console.print(f"  [faint]... and {len(index.episodes) - 10} more[/faint]")
     console.print()
 
 
-def _show_cost(engine: LennyEngine):
+def _show_cost(engine: object):
     """Show session cost summary."""
     console.print()
     if not engine.session_costs.queries:
         console.print("  No queries yet.")
     else:
-        console.print(Text(format_session_cost(engine.session_costs), style="dim"))
+        console.print(format_cost_compact(format_session_cost(engine.session_costs)))
     console.print()
 
 
@@ -304,14 +356,14 @@ def _ensure_api_key(config_path: Path) -> str:
             "  export ANTHROPIC_API_KEY=sk-ant-..."
         )
 
-    console.print("\n[bold]First-time setup[/bold]")
+    console.print("\n[accent]First-time setup[/accent]")
     console.print("  An Anthropic API key is required to run queries.")
     while True:
         entered = Prompt.ask("  Enter your Anthropic API key", password=True).strip()
         if entered:
             api_key = entered
             break
-        console.print("  [yellow]API key cannot be empty.[/yellow]")
+        console.print("  [warning]API key cannot be empty.[/warning]")
 
     os.environ["ANTHROPIC_API_KEY"] = api_key
 
@@ -323,6 +375,6 @@ def _ensure_api_key(config_path: Path) -> str:
             os.chmod(config_path, 0o600)
         except OSError:
             pass
-        console.print("  [dim]Saved.[/dim]\n")
+        console.print("  [faint]Saved.[/faint]\n")
 
     return api_key

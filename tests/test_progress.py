@@ -19,6 +19,7 @@ from rlm.core.types import (
 )
 
 from lenny.progress import ProgressDisplay, _infer_from_code, _truncate
+from lenny.style import PROGRESS_LABELS
 
 
 # ---------------------------------------------------------------------------
@@ -78,19 +79,19 @@ class TestExtractStatus:
     def test_final_answer_set(self):
         p = self._make_progress()
         it = _make_iteration(final_answer="Here is the answer")
-        assert p._extract_status(it) == "Preparing answer..."
+        assert p._extract_status(it) == PROGRESS_LABELS["preparing_answer"]
 
     def test_final_call_in_response(self):
         """FINAL(...) at start of line triggers preparing answer."""
         p = self._make_progress()
         it = _make_iteration(response="Let me wrap up.\nFINAL(my_answer)")
-        assert p._extract_status(it) == "Preparing answer..."
+        assert p._extract_status(it) == PROGRESS_LABELS["preparing_answer"]
 
     def test_final_var_in_response(self):
         """FINAL_VAR(...) also triggers preparing answer."""
         p = self._make_progress()
         it = _make_iteration(response="Done.\nFINAL_VAR(result)")
-        assert p._extract_status(it) == "Preparing answer..."
+        assert p._extract_status(it) == PROGRESS_LABELS["preparing_answer"]
 
     def test_incidental_final_word_does_not_trigger(self):
         """The word FINAL in prose should NOT trigger 'Preparing answer'."""
@@ -99,7 +100,7 @@ class TestExtractStatus:
             response="The FINAL step is to analyze the data.",
             code="x = 1",
         )
-        assert p._extract_status(it) != "Preparing answer..."
+        assert p._extract_status(it) != PROGRESS_LABELS["preparing_answer"]
 
     def test_stdout_line_preferred(self):
         """A meaningful stdout line is used as status."""
@@ -136,7 +137,7 @@ class TestExtractStatus:
             code="llm_query_batched(prompts)",
             rlm_calls=[_make_rlm_call(), _make_rlm_call(), _make_rlm_call()],
         )
-        assert p._extract_status(it) == "Analyzing 3 excerpts..."
+        assert p._extract_status(it) == PROGRESS_LABELS["analyzing_excerpts"].format(n=3, s="s")
 
     def test_single_sub_llm_call_no_plural(self):
         p = self._make_progress()
@@ -144,40 +145,40 @@ class TestExtractStatus:
             code="llm_query(prompt)",
             rlm_calls=[_make_rlm_call()],
         )
-        assert p._extract_status(it) == "Analyzing 1 excerpt..."
+        assert p._extract_status(it) == PROGRESS_LABELS["analyzing_excerpts"].format(n=1, s="")
 
     def test_code_inference_transcript_open(self):
         p = self._make_progress()
         it = _make_iteration(
             code='with open(f"{transcript_dir}/{slug}/transcript.md") as f:',
         )
-        assert p._extract_status(it) == "Reading transcripts..."
+        assert p._extract_status(it) == PROGRESS_LABELS["reading_transcripts"]
 
     def test_code_inference_llm_query_batched(self):
         p = self._make_progress()
         it = _make_iteration(code="results = llm_query_batched(prompts)")
-        assert p._extract_status(it) == "Analyzing excerpts in parallel..."
+        assert p._extract_status(it) == PROGRESS_LABELS["analyzing_parallel"]
 
     def test_code_inference_llm_query(self):
         p = self._make_progress()
         it = _make_iteration(code="answer = llm_query(prompt)")
-        assert p._extract_status(it) == "Analyzing with AI..."
+        assert p._extract_status(it) == PROGRESS_LABELS["analyzing_ai"]
 
     def test_code_inference_regex_search(self):
         p = self._make_progress()
         it = _make_iteration(code="matches = re.search(r'pattern', text)")
-        assert p._extract_status(it) == "Searching transcript text..."
+        assert p._extract_status(it) == PROGRESS_LABELS["searching_text"]
 
     def test_code_inference_catalog_scan(self):
         p = self._make_progress()
         it = _make_iteration(code='episodes = context["catalog"]')
-        assert p._extract_status(it) == "Scanning episode catalog..."
+        assert p._extract_status(it) == PROGRESS_LABELS["scanning_catalog"]
 
     def test_fallback_thinking(self):
         """Empty iteration with no code blocks falls back to 'Thinking...'"""
         p = self._make_progress()
         it = RLMIteration(prompt="test", response="hmm", code_blocks=[])
-        assert p._extract_status(it) == "Thinking..."
+        assert p._extract_status(it) == PROGRESS_LABELS["thinking"]
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +263,14 @@ class TestLogLifecycle:
     def test_duplicate_status_not_pushed(self):
         """If new status == current, don't push a completed step."""
         p = self._make_progress()
-        p._current_status = "Reading transcripts..."
+        p._current_status = PROGRESS_LABELS["reading_transcripts"]
 
         it = _make_iteration(
             code='open(f"{transcript_dir}/slug/transcript.md")',
         )
-        # This will infer "Reading transcripts..." — same as current
+        # This will infer the same reading_transcripts label — same as current
         p.log(it)
-        assert "Reading transcripts" not in p._completed_steps
+        assert PROGRESS_LABELS["reading_transcripts"].rstrip(".") not in p._completed_steps
 
     def test_completed_steps_cap(self):
         """Internal list is capped to avoid unbounded growth."""
@@ -353,22 +354,22 @@ class TestTruncate:
 class TestInferFromCode:
 
     def test_transcript_open(self):
-        assert _infer_from_code('open(f"{td}/transcript.md")') == "Reading transcripts..."
+        assert _infer_from_code('open(f"{td}/transcript.md")') == PROGRESS_LABELS["reading_transcripts"]
 
     def test_llm_query_batched(self):
-        assert _infer_from_code("llm_query_batched(prompts)") == "Analyzing excerpts in parallel..."
+        assert _infer_from_code("llm_query_batched(prompts)") == PROGRESS_LABELS["analyzing_parallel"]
 
     def test_llm_query(self):
-        assert _infer_from_code("answer = llm_query(p)") == "Analyzing with AI..."
+        assert _infer_from_code("answer = llm_query(p)") == PROGRESS_LABELS["analyzing_ai"]
 
     def test_regex_search(self):
-        assert _infer_from_code("re.search(r'pat', text)") == "Searching transcript text..."
+        assert _infer_from_code("re.search(r'pat', text)") == PROGRESS_LABELS["searching_text"]
 
     def test_regex_findall(self):
-        assert _infer_from_code("re.findall(r'pat', text)") == "Searching transcript text..."
+        assert _infer_from_code("re.findall(r'pat', text)") == PROGRESS_LABELS["searching_text"]
 
     def test_catalog_access(self):
-        assert _infer_from_code('eps = context["catalog"]') == "Scanning episode catalog..."
+        assert _infer_from_code('eps = context["catalog"]') == PROGRESS_LABELS["scanning_catalog"]
 
     def test_unknown_code_returns_none(self):
         assert _infer_from_code("x = 1 + 2") is None
@@ -395,3 +396,43 @@ class TestElapsed:
         p._start_time = time.time() - 155
         elapsed = p._elapsed()
         assert elapsed == "2:35"
+
+
+# ---------------------------------------------------------------------------
+# Theme plumbing
+# ---------------------------------------------------------------------------
+
+class TestThemePlumbing:
+
+    def test_spinner_uses_theme_style(self):
+        from lenny.style import LennyTheme, THEME_WARM
+        mock_theme = LennyTheme(
+            name="test",
+            accent=THEME_WARM.accent,
+            text=THEME_WARM.text,
+            text_dim=THEME_WARM.text_dim,
+            text_faint=THEME_WARM.text_faint,
+            fast=THEME_WARM.fast,
+            research=THEME_WARM.research,
+            success=THEME_WARM.success,
+            error=THEME_WARM.error,
+            warning=THEME_WARM.warning,
+            prompt=THEME_WARM.prompt,
+            border_fast=THEME_WARM.border_fast,
+            border_research=THEME_WARM.border_research,
+            spinner_style="line",  # different from default "dots"
+        )
+        p = ProgressDisplay(MagicMock(), initial_status="Test...", theme=mock_theme)
+        p._current_status = "Working..."
+        p._start_time = time.time()
+        renderable = p._build_renderable()
+        # The renderable is a Group; we can't easily inspect Spinner internals,
+        # but at minimum this should not raise and should produce output
+        assert renderable is not None
+
+    def test_spinner_defaults_to_dots_without_theme(self):
+        p = ProgressDisplay(MagicMock(), initial_status="Test...")
+        p._current_status = "Working..."
+        p._start_time = time.time()
+        renderable = p._build_renderable()
+        assert renderable is not None

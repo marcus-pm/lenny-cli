@@ -13,14 +13,14 @@ Ask natural-language questions across every episode. Get cited answers with gues
 - **BM25 search index** — paragraph-level full-text search with disk caching for fast startup
 - **Real-time cost tracking** per query and per session
 - **Verbose mode** to watch the research orchestration (code generation, sub-LM calls, iteration steps)
-- **Slash commands** for session control (`/help`, `/episodes`, `/cost`, `/mode`, `/verbose`, `/quit`)
+- **Slash commands** for session control (`/help`, `/episodes`, `/cost`, `/mode`, `/theme`, `/verbose`, `/quit`)
+- **Visual themes** — warm editorial default, minimal low-decoration option (`/theme`)
 - **Session memory** for follow-up questions
 
 ## Prerequisites
 
 - **Python 3.11+**
 - **Anthropic API key** — get one at [console.anthropic.com](https://console.anthropic.com/)
-- **Git** (for cloning with submodules)
 
 ## Install
 
@@ -31,15 +31,8 @@ lenny
 ```
 
 ```bash
-# Option B: Homebrew tap install (global `lenny` command)
-brew tap marcus-pm/lenny-cli
-brew install lenny-cli
-lenny
-```
-
-```bash
-# Option C: from source
-git clone --recursive https://github.com/marcus-pm/lenny-cli.git
+# Option B: from source
+git clone https://github.com/marcus-pm/lenny-cli.git
 cd lenny-cli
 python3 -m venv .venv
 source .venv/bin/activate
@@ -49,7 +42,7 @@ lenny
 
 > **First run:** If `ANTHROPIC_API_KEY` is missing, `lenny` prompts you for it and can save it to `~/.config/lenny/config.env`.
 >
-> **Submodule note:** For source installs, `--recursive` is required. If you already cloned without it, run `git submodule update --init`.
+> **Transcripts:** On first launch, `lenny` will offer to download the transcript corpus automatically (~50 MB). Alternatively, set `LENNY_TRANSCRIPTS=/path/to/episodes` to point to an existing copy.
 
 ## Usage
 
@@ -60,17 +53,21 @@ lenny
 ### Example Session
 
 ```
-Lenny CLI — Explore Lenny's Podcast with fast + research modes
+  Lenny
+  Podcast transcript explorer
 
-Ask questions about themes, patterns, and insights across all episodes.
-Queries are auto-routed: fast mode for targeted lookups, research mode for synthesis.
+  152 episodes loaded  ·  mode: auto
+
+  Try: "What frameworks do guests recommend for prioritization?"
+
+  /help  /episodes  /cost  /mode  /theme  /quit
 
 You: What did Brian Chesky say about founder mode?
 
-  → fast (specific guest lookup)
+   FAST   specific guest lookup
   Searching transcripts...
 
-┌─ Lenny (fast) ────────────────────────────────────────┐
+┌─ Lenny fast ──────────────────────────────────────────┐
 │                                                         │
 │  Brian Chesky discussed founder mode in his episode...  │
 │  ...cited answer with YouTube links...                  │
@@ -82,10 +79,10 @@ You: What did Brian Chesky say about founder mode?
 
 You: What frameworks do guests recommend for prioritization?
 
-  → research (multi-guest synthesis)
-  Searching episodes...
+   RESEARCH   multi-guest synthesis
+  Searching 152 episodes...
 
-┌─ Lenny (research) ────────────────────────────────────┐
+┌─ Lenny research ──────────────────────────────────────┐
 │                                                         │
 │  Several guests have shared prioritization frameworks:  │
 │  ...cited answer with YouTube links...                  │
@@ -108,6 +105,9 @@ You: What frameworks do guests recommend for prioritization?
 | `/mode auto`      | Automatic routing based on query (default)      |
 | `/mode fast`      | Force fast path for all queries                 |
 | `/mode research`  | Force research path for all queries             |
+| `/theme`          | Show current visual theme                       |
+| `/theme warm`     | Warm editorial theme with colors (default)      |
+| `/theme minimal`  | Low-decoration plain theme                      |
 | `/verbose`        | Toggle verbose mode (see research orchestration)|
 | `/quit`           | Exit (also `/exit`, `/q`)                       |
 
@@ -169,18 +169,20 @@ Set these in your `.env` file (see `.env.example`).
 lenny-cli/
 ├── src/lenny/
 │   ├── cli.py          # Chat loop, slash commands, routing dispatch
+│   ├── style.py        # UI tokens, themes, colors, ASCII art, microcopy
 │   ├── engine.py       # Research engine orchestration, sandbox, system prompt
 │   ├── rag.py          # Fast path engine (BM25 + single Haiku call)
 │   ├── router.py       # Hybrid router (guardrails + LLM judge + fallback)
 │   ├── search.py       # BM25 paragraph-level search index
 │   ├── data.py         # Transcript loading and indexing
 │   ├── costs.py        # Token usage and cost tracking
+│   ├── persist.py      # Response saving and citation formatting
+│   ├── progress.py     # Live progress display for research queries
 │   ├── __main__.py     # python -m lenny entry point
 │   └── __init__.py
 ├── tests/
 │   ├── test_sandbox.py # REPL sandbox regression tests
 │   └── test_router.py  # Router regression tests
-├── transcripts/        # Git submodule — episode transcripts
 ├── .env.example        # Template for API key
 ├── pyproject.toml      # Package metadata and dependencies
 ├── Makefile            # Setup automation
