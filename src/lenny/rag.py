@@ -29,7 +29,7 @@ _MAX_TOTAL_CHUNKS = 15
 INSUFFICIENT_EVIDENCE = (
     "I couldn't find enough relevant information in the podcast transcripts "
     "to answer this question confidently. Try rephrasing your question, or "
-    "use `/mode rlm` for a deeper search that examines transcripts more thoroughly."
+    "use `/mode research` for a deeper search that examines transcripts more thoroughly."
 )
 
 RAG_SYSTEM_PROMPT = textwrap.dedent("""\
@@ -150,7 +150,7 @@ class RAGEngine:
         """Format recent RAG-mode conversation history for context."""
         # Only include RAG-mode entries to avoid confusing Haiku with
         # RLM's more detailed answers
-        rag_history = [h for h in history if h.get("mode") == "rag"]
+        rag_history = [h for h in history if h.get("mode") in ("fast", "rag")]
         recent = rag_history[-5:]
         if not recent:
             return ""

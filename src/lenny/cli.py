@@ -16,6 +16,7 @@ from rich.text import Text
 from lenny.costs import format_query_cost, format_session_cost
 from lenny.data import TranscriptIndex
 from lenny.engine import LennyEngine
+from lenny.persist import format_terminal_citations, save_response_markdown
 from lenny.progress import ProgressDisplay
 from lenny.rag import RAGEngine
 from lenny.router import QueryMode, RouteDecision, classify_query
@@ -24,10 +25,10 @@ from lenny.search import TranscriptSearchIndex
 console = Console()
 
 WELCOME = """\
-[bold]Lenny CLI[/bold] — Explore Lenny's Podcast with RLM + RAG
+[bold]Lenny CLI[/bold] — Explore Lenny's Podcast with fast + research modes
 
 Ask questions about themes, patterns, and insights across {count} episodes.
-Queries are auto-routed: fast RAG for targeted lookups, deep RLM for synthesis.
+Queries are auto-routed: fast mode for targeted lookups, research mode for synthesis.
 
 Commands: /help /episodes /cost /mode /verbose /quit
 """
@@ -37,20 +38,20 @@ HELP_TEXT = """\
   /help      Show this help message
   /episodes  List loaded episodes (count + sample)
   /cost      Show session token usage and cost
-  /mode      Show or set routing mode (auto, rag, rlm)
-  /verbose   Toggle verbose mode (see RLM orchestration)
+  /mode      Show or set routing mode (auto, fast, research)
+  /verbose   Toggle verbose mode (see research orchestration)
   /quit      Exit
 
 [bold]Routing modes[/bold]
-  /mode auto   Automatic routing based on query (default)
-  /mode rag    Force fast RAG path for all queries
-  /mode rlm    Force deep RLM path for all queries
+  /mode auto      Automatic routing based on query (default)
+  /mode fast      Force fast path for all queries
+  /mode research  Force research path for all queries
 
 [bold]Example queries[/bold]
-  What did Brian Chesky say about founder mode?          → [dim]RAG (fast)[/dim]
-  What frameworks do guests recommend for prioritization? → [dim]RLM (deep)[/dim]
-  Which guests disagree with each other on hiring?        → [dim]RLM (deep)[/dim]
-  Find the quote about 'disagree and commit'              → [dim]RAG (fast)[/dim]
+  What did Brian Chesky say about founder mode?          → [dim]fast[/dim]
+  What frameworks do guests recommend for prioritization? → [dim]research[/dim]
+  Which guests disagree with each other on hiring?        → [dim]research[/dim]
+  Find the quote about 'disagree and commit'              → [dim]fast[/dim]
 """
 
 
@@ -142,22 +143,22 @@ def main():
                 continue
 
         # Route the query
-        if forced_mode == QueryMode.RLM:
-            route = RouteDecision(QueryMode.RLM, "forced")
-        elif forced_mode == QueryMode.RAG:
-            route = RouteDecision(QueryMode.RAG, "forced")
+        if forced_mode == QueryMode.RESEARCH:
+            route = RouteDecision(QueryMode.RESEARCH, "forced")
+        elif forced_mode == QueryMode.FAST:
+            route = RouteDecision(QueryMode.FAST, "forced")
         else:
             route = classify_query(
                 query, engine.conversation_history, client=rag_engine.client,
             )
 
         console.print()
-        mode_label = "rag" if route.mode == QueryMode.RAG else "rlm"
+        mode_label = "fast" if route.mode == QueryMode.FAST else "research"
         console.print(f"  [dim]→ {mode_label} ({route.reason})[/dim]")
 
         # Execute via the appropriate path
         try:
-            if route.mode == QueryMode.RAG:
+            if route.mode == QueryMode.FAST:
                 with ProgressDisplay(
                     console, initial_status="Searching transcripts...",
                 ):
@@ -168,10 +169,10 @@ def main():
                 engine.conversation_history.append({
                     "question": query,
                     "answer": answer[:2000],
-                    "mode": "rag",
+                    "mode": "fast",
                 })
             else:
-                # RLM path
+                # Research path
                 if verbose:
                     console.print(f"[dim]  Searching {len(index.episodes)} episodes...[/dim]\n")
                     answer, query_cost = engine.query(query)
@@ -188,7 +189,7 @@ def main():
                         engine.rlm.logger = None
                 # engine.query() already appends to conversation_history — add mode tag
                 if engine.conversation_history:
-                    engine.conversation_history[-1]["mode"] = "rlm"
+                    engine.conversation_history[-1]["mode"] = "research"
         except KeyboardInterrupt:
             console.print("\n[dim]Query interrupted.[/dim]")
             continue
@@ -196,20 +197,35 @@ def main():
             console.print(f"\n[red]Error:[/red] {e}")
             continue
 
-        # Display answer
+        # Display answer (with terminal-friendly citation URLs)
+        terminal_answer = format_terminal_citations(answer)
         console.print()
-        border = "cyan" if route.mode == QueryMode.RAG else "blue"
-        title_suffix = " [dim](RAG)[/dim]" if route.mode == QueryMode.RAG else " [dim](RLM)[/dim]"
+        border = "cyan" if route.mode == QueryMode.FAST else "blue"
+        title_suffix = " [dim](fast)[/dim]" if route.mode == QueryMode.FAST else " [dim](research)[/dim]"
         console.print(Panel(
-            Markdown(answer),
+            Markdown(terminal_answer),
             title=f"[bold]Lenny[/bold]{title_suffix}",
             border_style=border,
             padding=(1, 2),
         ))
 
         # Display cost
+        cost_str = format_query_cost(query_cost)
         console.print()
-        console.print(Text(format_query_cost(query_cost), style="dim"))
+        console.print(Text(cost_str, style="dim"))
+
+        # Save response to timestamped Markdown file
+        try:
+            saved = save_response_markdown(
+                query=query,
+                answer=answer,
+                mode=mode_label,
+                cost_summary=cost_str,
+            )
+            console.print(f"  [dim]Saved response: {saved.name}[/dim]")
+        except Exception:
+            console.print("  [dim yellow]Warning: could not save response file.[/dim yellow]")
+
         console.print()
 
 
@@ -228,14 +244,14 @@ def _handle_mode_command(
     if arg == "auto":
         console.print("  Routing mode: [bold]auto[/bold] (queries routed automatically)")
         return None
-    elif arg == "rag":
-        console.print("  Routing mode: [bold]rag[/bold] (all queries use fast RAG)")
-        return QueryMode.RAG
-    elif arg == "rlm":
-        console.print("  Routing mode: [bold]rlm[/bold] (all queries use deep RLM)")
-        return QueryMode.RLM
+    elif arg in ("fast", "rag"):
+        console.print("  Routing mode: [bold]fast[/bold] (all queries use fast path)")
+        return QueryMode.FAST
+    elif arg in ("research", "rlm"):
+        console.print("  Routing mode: [bold]research[/bold] (all queries use research path)")
+        return QueryMode.RESEARCH
     else:
-        console.print(f"  Unknown mode: {arg}. Options: auto, rag, rlm")
+        console.print(f"  Unknown mode: {arg}. Options: auto, fast, research")
         return current_mode
 
 

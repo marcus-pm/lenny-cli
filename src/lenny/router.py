@@ -1,9 +1,9 @@
-"""Query classifier for routing between RAG and RLM paths.
+"""Query classifier for routing between fast and research paths.
 
 Three-tier classification:
 1. Deterministic guardrails — hard rules for obvious cases (zero latency)
 2. LLM judge — cheap Haiku call for ambiguous queries (~1-2s, ~$0.001)
-3. Conservative fallback — default to RLM when uncertain
+3. Conservative fallback — default to research when uncertain
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 class QueryMode(Enum):
     """Routing mode for a query."""
-    RAG = "rag"
-    RLM = "rlm"
+    FAST = "fast"
+    RESEARCH = "research"
     AUTO = "auto"
 
 
@@ -39,8 +39,8 @@ class RouteDecision:
 # Tier 1: Deterministic guardrails
 # ---------------------------------------------------------------------------
 
-# Hard RLM — any match forces RLM immediately
-_RLM_PATTERNS: list[tuple[str, str]] = [
+# Hard RESEARCH — any match forces research immediately
+_RESEARCH_PATTERNS: list[tuple[str, str]] = [
     # Cross-episode synthesis
     (r"\bacross\s+episodes?\b", "cross-episode synthesis"),
     (r"\bcompare\b", "comparison analysis"),
@@ -68,10 +68,18 @@ _RLM_PATTERNS: list[tuple[str, str]] = [
     (r"\bevolution\s+of\b", "evolution analysis"),
     (r"\bover\s+time\b", "temporal analysis"),
     (r"\bchanged?\s+(over|through|across)\b", "temporal analysis"),
+
+    # Strategy / guide queries (intent-phrase patterns)
+    (r"\b(create|build|write|design|develop)\s+(a\s+)?(guide|playbook|handbook)\b", "strategy synthesis"),
+    (r"\b(guide|playbook|handbook)\s+(for|to|on)\b", "strategy synthesis"),
+    (r"\bstrategy\s+(for|to|on)\b", "strategy synthesis"),
+    (r"\b(0|zero)\s*[-\u2013]?\s*to\s*[-\u2013]?\s*(1|one)\b", "strategy synthesis"),
+    (r"\bfrom\s+scratch\b", "comprehensive analysis"),
+    (r"\bend[- ]to[- ]end\b", "comprehensive analysis"),
 ]
 
-# Hard RAG — specific targeted lookups
-_RAG_PATTERNS: list[tuple[str, str]] = [
+# Hard FAST — specific targeted lookups
+_FAST_PATTERNS: list[tuple[str, str]] = [
     (r"\bwhat\s+did\s+\w+(\s+\w+)?\s+(say|mention|talk|discuss|recommend)\b", "specific guest lookup"),
     (r"\bwhich\s+episode\b", "episode lookup"),
     (r"\bfind\s+(the\s+)?quote\b", "quote lookup"),
@@ -82,7 +90,7 @@ _RAG_PATTERNS: list[tuple[str, str]] = [
     (r"\btell\s+me\s+about\s+the\s+episode\b", "episode lookup"),
 ]
 
-# Multi-entity / plural subjects → forces RLM even when RAG surface patterns match
+# Multi-entity / plural subjects \u2192 forces research even when fast surface patterns match
 _MULTI_ENTITY_PATTERNS: list[tuple[str, str]] = [
     (r"\bguests\b", "multi-guest synthesis"),
     (r"\bexperts\b", "multi-expert synthesis"),
@@ -101,14 +109,16 @@ _JUDGE_SYSTEM_PROMPT = """\
 You are a query routing classifier for a podcast transcript search application.
 
 The application has two query paths:
-- RAG: Fast keyword search + single LLM synthesis. Best for: looking up what a specific person said, finding a particular quote, checking a fact from one episode, simple definitions.
-- RLM: Deep multi-step analysis where an LLM writes code to search across all 303 transcripts, extract patterns, and synthesize findings. Best for: comparing perspectives across guests, identifying themes, analyzing trends, any question requiring information from many episodes.
+- FAST: Fast keyword search + single LLM synthesis. Best for: looking up what a specific person said, finding a particular quote, checking a fact from one episode, simple definitions.
+- RESEARCH: Deep multi-step analysis where an LLM writes code to search across all transcripts, extract patterns, and synthesize findings. Best for: comparing perspectives across guests, identifying themes, analyzing trends, any question requiring information from many episodes.
 
-Given a user query, respond with exactly one word: RAG or RLM.
+Given a user query, respond with exactly one word: FAST or RESEARCH.
 
-If unsure, say RLM (it's slower but more thorough — better to be safe)."""
+If unsure, say RESEARCH (it's slower but more thorough \u2014 better to be safe)."""
 
 _JUDGE_MODEL = "claude-haiku-4-5-20251001"
+
+_JUDGE_TOKEN_RE = re.compile(r"\b(FAST|RESEARCH)\b")
 
 
 def _llm_judge(
@@ -127,21 +137,23 @@ def _llm_judge(
         answer = response.content[0].text.strip().upper()
         elapsed = time.perf_counter() - start
         logger.debug(
-            "LLM judge: %r → %s (%.1fs, %d in/%d out tokens)",
+            "LLM judge: %r \u2192 %s (%.1fs, %d in/%d out tokens)",
             query, answer, elapsed,
             response.usage.input_tokens, response.usage.output_tokens,
         )
 
-        if answer.startswith("RAG"):
-            return RouteDecision(QueryMode.RAG, "llm-judge → rag")
-        elif answer.startswith("RLM"):
-            return RouteDecision(QueryMode.RLM, "llm-judge → rlm")
-        else:
-            # Unparseable response — fall through to conservative default
+        match = _JUDGE_TOKEN_RE.search(answer)
+        if match is None:
             logger.debug("LLM judge returned unparseable: %r", answer)
             return None
+
+        token = match.group(1)
+        if token == "FAST":
+            return RouteDecision(QueryMode.FAST, "llm-judge \u2192 fast")
+        else:
+            return RouteDecision(QueryMode.RESEARCH, "llm-judge \u2192 research")
     except Exception as e:
-        # Network error, rate limit, etc. — non-fatal, fall through
+        # Network error, rate limit, etc. \u2014 non-fatal, fall through
         logger.debug("LLM judge error: %s", e)
         return None
 
@@ -154,56 +166,56 @@ def classify_query(
     conversation_history: list[dict] | None = None,
     client: anthropic.Anthropic | None = None,
 ) -> RouteDecision:
-    """Classify a query as RAG or RLM using a three-tier approach.
+    """Classify a query as fast or research using a three-tier approach.
 
-    Tier 1 — Deterministic guardrails (evaluated in order):
-      1a. Follow-up to RLM → RLM
-      1b. Multi-entity / plural-subject → RLM
-      1c. RAG surface patterns (specific lookups) → RAG
-      1d. RLM surface patterns (synthesis/analysis) → RLM
+    Tier 1 \u2014 Deterministic guardrails (evaluated in order):
+      1a. Follow-up to research \u2192 research
+      1b. Multi-entity / plural-subject \u2192 research
+      1c. Fast surface patterns (specific lookups) \u2192 fast
+      1d. Research surface patterns (synthesis/analysis) \u2192 research
 
-    Tier 2 — LLM judge (only if no guardrail matched AND client provided):
+    Tier 2 \u2014 LLM judge (only if no guardrail matched AND client provided):
       Cheap Haiku call (~1-2s, ~$0.001) to classify ambiguous queries.
 
-    Tier 3 — Conservative fallback:
-      Default to RLM (prefer thorough over fast).
+    Tier 3 \u2014 Conservative fallback:
+      Default to research (prefer thorough over fast).
     """
     query_lower = query.lower().strip()
     history = conversation_history or []
 
-    # ── Tier 1: Deterministic guardrails ──────────────────────────────
+    # \u2500\u2500 Tier 1: Deterministic guardrails \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     # 1a. Follow-up detection
     if history and _is_followup(query_lower):
-        last_mode = history[-1].get("mode", "rlm")
-        if last_mode == "rlm":
-            return RouteDecision(QueryMode.RLM, "follow-up to deep analysis")
+        last_mode = history[-1].get("mode", "research")
+        if last_mode in ("research", "rlm"):
+            return RouteDecision(QueryMode.RESEARCH, "follow-up to deep analysis")
 
-    # 1b. Multi-entity / plural-subject → RLM
+    # 1b. Multi-entity / plural-subject \u2192 research
     for pattern, reason in _MULTI_ENTITY_PATTERNS:
         if re.search(pattern, query_lower):
-            return RouteDecision(QueryMode.RLM, reason)
+            return RouteDecision(QueryMode.RESEARCH, reason)
 
-    # 1c. RAG signals (specific lookups)
-    for pattern, reason in _RAG_PATTERNS:
+    # 1c. Fast signals (specific lookups)
+    for pattern, reason in _FAST_PATTERNS:
         if re.search(pattern, query_lower):
-            return RouteDecision(QueryMode.RAG, reason)
+            return RouteDecision(QueryMode.FAST, reason)
 
-    # 1d. RLM signals (synthesis/analysis)
-    for pattern, reason in _RLM_PATTERNS:
+    # 1d. Research signals (synthesis/analysis)
+    for pattern, reason in _RESEARCH_PATTERNS:
         if re.search(pattern, query_lower):
-            return RouteDecision(QueryMode.RLM, reason)
+            return RouteDecision(QueryMode.RESEARCH, reason)
 
-    # ── Tier 2: LLM judge for ambiguous queries ──────────────────────
+    # \u2500\u2500 Tier 2: LLM judge for ambiguous queries \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     if client is not None:
         decision = _llm_judge(query, client)
         if decision is not None:
             return decision
 
-    # ── Tier 3: Conservative fallback ─────────────────────────────────
+    # \u2500\u2500 Tier 3: Conservative fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-    return RouteDecision(QueryMode.RLM, "ambiguous → default rlm")
+    return RouteDecision(QueryMode.RESEARCH, "ambiguous \u2192 default research")
 
 
 def _is_followup(query_lower: str) -> bool:

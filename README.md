@@ -2,17 +2,17 @@
 
 A terminal chat app for exploring [Lenny's Podcast](https://www.lennyspodcast.com/) transcripts using the [Recursive Language Model (RLM)](https://github.com/alexzhang13/rlm) paradigm.
 
-Ask natural-language questions across 303 episodes. Get cited answers with guest names, episode titles, and YouTube links.
+Ask natural-language questions across every episode. Get cited answers with guest names, episode titles, and YouTube links.
 
 ## Features
 
-- **Automatic query routing** — fast RAG for targeted lookups, deep RLM for cross-episode synthesis
-- **Natural language queries** across 303 podcast transcripts
+- **Automatic query routing** — fast mode for targeted lookups, research mode for cross-episode synthesis
+- **Natural language queries** across all podcast transcripts
 - **Episode citations** with guest names, titles, and YouTube links
 - **Dual-model architecture** — Claude Opus 4.6 orchestrates via code, Claude Haiku 4.5 analyzes transcript chunks
 - **BM25 search index** — paragraph-level full-text search with disk caching for fast startup
 - **Real-time cost tracking** per query and per session
-- **Verbose mode** to watch the RLM orchestration (code generation, sub-LM calls, iteration steps)
+- **Verbose mode** to watch the research orchestration (code generation, sub-LM calls, iteration steps)
 - **Slash commands** for session control (`/help`, `/episodes`, `/cost`, `/mode`, `/verbose`, `/quit`)
 - **Session memory** for follow-up questions
 
@@ -60,17 +60,17 @@ lenny
 ### Example Session
 
 ```
-Lenny CLI — Explore Lenny's Podcast with RLM + RAG
+Lenny CLI — Explore Lenny's Podcast with fast + research modes
 
-Ask questions about themes, patterns, and insights across 303 episodes.
-Queries are auto-routed: fast RAG for targeted lookups, deep RLM for synthesis.
+Ask questions about themes, patterns, and insights across all episodes.
+Queries are auto-routed: fast mode for targeted lookups, research mode for synthesis.
 
 You: What did Brian Chesky say about founder mode?
 
-  → rag (specific guest lookup)
+  → fast (specific guest lookup)
   Searching transcripts...
 
-┌─ Lenny (RAG) ──────────────────────────────────────────┐
+┌─ Lenny (fast) ────────────────────────────────────────┐
 │                                                         │
 │  Brian Chesky discussed founder mode in his episode...  │
 │  ...cited answer with YouTube links...                  │
@@ -82,10 +82,10 @@ You: What did Brian Chesky say about founder mode?
 
 You: What frameworks do guests recommend for prioritization?
 
-  → rlm (multi-guest synthesis)
-  Searching 303 episodes...
+  → research (multi-guest synthesis)
+  Searching episodes...
 
-┌─ Lenny (RLM) ──────────────────────────────────────────┐
+┌─ Lenny (research) ────────────────────────────────────┐
 │                                                         │
 │  Several guests have shared prioritization frameworks:  │
 │  ...cited answer with YouTube links...                  │
@@ -99,23 +99,23 @@ You: What frameworks do guests recommend for prioritization?
 
 ### Slash Commands
 
-| Command        | Description                                     |
-|----------------|-------------------------------------------------|
-| `/help`        | Show help message                               |
-| `/episodes`    | List loaded episodes (count + sample)           |
-| `/cost`        | Show session token usage and estimated cost     |
-| `/mode`        | Show current routing mode                       |
-| `/mode auto`   | Automatic routing based on query (default)      |
-| `/mode rag`    | Force fast RAG path for all queries             |
-| `/mode rlm`    | Force deep RLM path for all queries             |
-| `/verbose`     | Toggle verbose mode (see RLM orchestration)     |
-| `/quit`        | Exit (also `/exit`, `/q`)                       |
+| Command           | Description                                     |
+|-------------------|-------------------------------------------------|
+| `/help`           | Show help message                               |
+| `/episodes`       | List loaded episodes (count + sample)           |
+| `/cost`           | Show session token usage and estimated cost     |
+| `/mode`           | Show current routing mode                       |
+| `/mode auto`      | Automatic routing based on query (default)      |
+| `/mode fast`      | Force fast path for all queries                 |
+| `/mode research`  | Force research path for all queries             |
+| `/verbose`        | Toggle verbose mode (see research orchestration)|
+| `/quit`           | Exit (also `/exit`, `/q`)                       |
 
 ## How It Works
 
 Lenny CLI uses two query paths, automatically selected based on the question:
 
-### RAG Path (fast, ~5-15s, ~$0.01)
+### Fast Path (~5-15s, ~$0.01)
 
 For targeted lookups like "What did Brian Chesky say about founder mode?":
 
@@ -123,7 +123,7 @@ For targeted lookups like "What did Brian Chesky say about founder mode?":
 2. Top results are sent to Claude Haiku 4.5 for synthesis
 3. Single API call returns a cited answer
 
-### RLM Path (deep, ~30-120s, ~$0.15)
+### Research Path (~30-120s, ~$0.15)
 
 For cross-episode synthesis like "What themes do guests disagree about?":
 
@@ -135,11 +135,13 @@ For cross-episode synthesis like "What themes do guests disagree about?":
 
 The router uses a three-tier classifier:
 
-1. **Deterministic guardrails** for obvious RAG/RLM cases
+1. **Deterministic guardrails** for obvious fast/research cases
 2. **LLM judge** (Haiku) for ambiguous queries
-3. **Conservative fallback** to RLM when uncertain
+3. **Conservative fallback** to research when uncertain
 
-Use `/mode rag` or `/mode rlm` to force a specific path.
+Use `/mode fast` or `/mode research` to force a specific path.
+
+> **Technical note:** The fast path uses RAG (retrieval-augmented generation) and the research path uses the [RLM](https://github.com/alexzhang13/rlm) framework.
 
 ## Cost
 
@@ -150,7 +152,7 @@ The app uses two Anthropic models with the following pricing (per million tokens
 | Claude Opus 4.6   | $5.00   | $25.00  |
 | Claude Haiku 4.5  | $0.80   | $4.00   |
 
-RAG queries cost roughly $0.005-0.02. RLM queries cost roughly $0.10-0.25. Use `/cost` during a session to see running totals.
+Fast queries cost roughly $0.005-0.02. Research queries cost roughly $0.10-0.25. Use `/cost` during a session to see running totals.
 
 ## Configuration
 
@@ -167,8 +169,8 @@ Set these in your `.env` file (see `.env.example`).
 lenny-cli/
 ├── src/lenny/
 │   ├── cli.py          # Chat loop, slash commands, routing dispatch
-│   ├── engine.py       # RLM orchestration, sandbox, system prompt
-│   ├── rag.py          # RAG engine (BM25 + single Haiku call)
+│   ├── engine.py       # Research engine orchestration, sandbox, system prompt
+│   ├── rag.py          # Fast path engine (BM25 + single Haiku call)
 │   ├── router.py       # Hybrid router (guardrails + LLM judge + fallback)
 │   ├── search.py       # BM25 paragraph-level search index
 │   ├── data.py         # Transcript loading and indexing
@@ -178,7 +180,7 @@ lenny-cli/
 ├── tests/
 │   ├── test_sandbox.py # REPL sandbox regression tests
 │   └── test_router.py  # Router regression tests
-├── transcripts/        # Git submodule — 303 episode transcripts
+├── transcripts/        # Git submodule — episode transcripts
 ├── .env.example        # Template for API key
 ├── pyproject.toml      # Package metadata and dependencies
 ├── Makefile            # Setup automation

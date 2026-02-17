@@ -41,7 +41,7 @@ class ProgressDisplay:
 
     Usage::
 
-        progress = ProgressDisplay(console, initial_status="Searching 303 episodes...")
+        progress = ProgressDisplay(console, initial_status="Searching episodes...")
         engine.rlm.logger = progress
         try:
             with progress:

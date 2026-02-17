@@ -1,7 +1,7 @@
 class LennyCli < Formula
   include Language::Python::Virtualenv
 
-  desc "CLI for exploring Lenny's Podcast transcripts with RAG + RLM routing"
+  desc "CLI for exploring Lenny's Podcast transcripts with fast + research routing"
   homepage "https://github.com/marcus-pm/lenny-cli"
   url "https://github.com/marcus-pm/lenny-cli.git",
       branch: "main",
