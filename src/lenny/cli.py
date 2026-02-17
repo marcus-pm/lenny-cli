@@ -158,9 +158,8 @@ def main():
         # Execute via the appropriate path
         try:
             if route.mode == QueryMode.RAG:
-                with console.status(
-                    "[bold]  Searching transcripts...",
-                    spinner="dots",
+                with ProgressDisplay(
+                    console, initial_status="Searching transcripts...",
                 ):
                     answer, query_cost = rag_engine.query(
                         query, engine.conversation_history,

@@ -183,9 +183,7 @@ class ProgressDisplay:
         # Current step: spinner + status text + elapsed time
         status_text = Text()
         status_text.append(self._current_status, style="bold")
-        elapsed = self._elapsed()
-        if elapsed != "0:00":
-            status_text.append(f"  {elapsed}", style="dim")
+        status_text.append(f"  {self._elapsed()}", style="dim")
 
         spinner = Spinner("dots", text=status_text, style="cyan")
         # Wrap with indent
