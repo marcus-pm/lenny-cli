@@ -123,7 +123,7 @@ For targeted lookups like "What did Brian Chesky say about founder mode?":
 2. Top results are sent to Claude Haiku 4.5 for synthesis
 3. Single API call returns a cited answer
 
-### Research Path (~30-120s, ~$0.15)
+### Research Path (~120-600s, ~$1.50)
 
 For cross-episode synthesis like "What themes do guests disagree about?":
 
