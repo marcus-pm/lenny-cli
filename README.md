@@ -143,6 +143,8 @@ Use `/mode fast` or `/mode research` to force a specific path.
 
 > **Technical note:** The fast path uses RAG (retrieval-augmented generation) and the research path uses the [RLM](https://github.com/alexzhang13/rlm) framework.
 
+> **See it in action:** [RLM vs RAG vs Lennybot](examples/rlm-vs-rag-vs-lennybot.md) — a side-by-side comparison of the same synthesis prompt across all three methods, with commentary on output quality and cost tradeoffs.
+
 ## Cost
 
 The app uses two Anthropic models with the following pricing (per million tokens):
@@ -180,6 +182,8 @@ lenny-cli/
 │   ├── progress.py     # Live progress display for research queries
 │   ├── __main__.py     # python -m lenny entry point
 │   └── __init__.py
+├── examples/
+│   └── rlm-vs-rag-vs-lennybot.md  # RLM vs RAG vs Lennybot comparison
 ├── tests/
 │   ├── test_sandbox.py # REPL sandbox regression tests
 │   └── test_router.py  # Router regression tests
