@@ -453,4 +453,7 @@ PROGRESS_LABELS: dict[str, str] = {
     # Initial statuses
     "searching_episodes":    "Searching {n} episodes...",
     "searching_transcripts": "Searching transcripts...",
+
+    # Rate limit
+    "rate_limited":          "Rate limited \u2014 retrying in {wait}s...",
 }

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import builtins
 import os
+import random
 import textwrap
 import time
 from pathlib import Path
+from typing import Callable
 
+import anthropic
 from dotenv import load_dotenv
 from rlm import RLM
 from rlm.core.lm_handler import LMRequestHandler, LMHandler
@@ -45,6 +48,55 @@ MAX_CONCURRENT_SUB_CALLS = 2
 DELAY_BETWEEN_CALLS = 1.0  # seconds
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5.0  # seconds — exponential backoff base for 429s
+
+# Query-level retry config for root model 429s (TPM window resets).
+# This is the single retry authority — SDK retries stay at default (2) for
+# transient errors; this wrapper handles longer TPM-style waits.
+_MAX_QUERY_RETRIES = 2          # 3 total attempts
+_MAX_TOTAL_RETRY_SECS = 120.0   # wall-clock cap (outer wait only; excludes SDK internal waits)
+_DEFAULT_RETRY_WAIT = 30.0      # roughly one TPM window
+
+
+def is_rate_limit_error(e: Exception) -> bool:
+    """Check if an exception is a rate limit error (429).
+
+    Detection priority: isinstance → structured status → string fallback.
+    """
+    if isinstance(e, anthropic.RateLimitError):
+        return True
+    # Structured status code check (some SDK wrappers expose this)
+    status = getattr(e, "status_code", None) or getattr(e, "status", None)
+    if status == 429:
+        return True
+    # String fallback — intentionally conservative
+    err_str = str(e)
+    return "rate_limit_error" in err_str.lower()
+
+
+def _compute_retry_wait(e: Exception, attempt: int) -> float:
+    """Compute wait time: Retry-After header > exponential backoff, plus jitter.
+
+    Returns seconds to sleep, capped at 90s per attempt.
+    """
+    retry_after = None
+    response = getattr(e, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            raw = headers.get("retry-after")
+            if raw is not None:
+                try:
+                    retry_after = float(raw)
+                except (ValueError, TypeError):
+                    pass
+
+    if retry_after is not None and 0 < retry_after <= 120:
+        base_wait = retry_after
+    else:
+        base_wait = _DEFAULT_RETRY_WAIT * (1.5 ** attempt)  # 30s, 45s
+
+    jitter = random.uniform(0, 5)
+    return min(base_wait + jitter, 90)
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +485,8 @@ to read full transcript files and query sub-LLMs for analysis.
 Your REPL is initialized with:
 
 1. A `context` variable — a JSON dict containing:
-   - `"catalog"`: a list of episode dicts, each with: slug, guest, title, youtube_url, publish_date, duration, keywords
+   - `"catalog"`: a list of episode dicts, each with: slug, guest, title, publish_date, duration, keywords
+   - `"youtube_urls"`: a `{slug: url}` lookup dict for YouTube links (use this for citation URLs)
    - `"transcript_dir"`: the filesystem path to the episodes directory
    - `"conversation_history"`: list of prior Q&A pairs from this session (for follow-up context)
 
@@ -493,7 +546,7 @@ for ep in context["catalog"]:
             relevant_excerpts.append({{
                 "guest": ep["guest"],
                 "title": ep["title"],
-                "youtube_url": ep["youtube_url"],
+                "youtube_url": context["youtube_urls"].get(ep["slug"], ""),
                 "excerpt": p[:3000]  # Keep excerpts small
             }})
 print(f"Found {{len(relevant_excerpts)}} relevant excerpts")
@@ -577,6 +630,7 @@ class LennyEngine:
         self.max_iterations = max_iterations
         self.session_costs = SessionCosts()
         self.conversation_history: list[dict[str, str]] = []
+        self._on_rate_limit: Callable[[float, int, int], None] | None = None
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
@@ -617,33 +671,92 @@ class LennyEngine:
     def query(self, question: str) -> tuple[str, QueryCost]:
         """Run a question through the RLM engine.
 
+        Includes adaptive payload trimming and retry with backoff on 429.
         Returns (answer_text, query_cost).
         """
-        # Build context payload with catalog + conversation history
-        context_payload = {
-            "catalog": self.index.get_catalog(),
+        context_payload = self._build_context_payload()
+
+        retry_start = time.perf_counter()
+        last_error: Exception | None = None
+
+        for attempt in range(_MAX_QUERY_RETRIES + 1):
+            try:
+                result = self.rlm.completion(
+                    prompt=context_payload,
+                    root_prompt=question,
+                )
+            except anthropic.RateLimitError as e:
+                last_error = e
+                if attempt >= _MAX_QUERY_RETRIES:
+                    raise
+                wait = _compute_retry_wait(e, attempt)
+                elapsed = time.perf_counter() - retry_start
+                if elapsed + wait > _MAX_TOTAL_RETRY_SECS:
+                    raise
+                if self._on_rate_limit:
+                    self._on_rate_limit(wait, attempt + 1, _MAX_QUERY_RETRIES)
+                time.sleep(wait)
+                continue
+            except Exception as e:
+                if not is_rate_limit_error(e):
+                    raise
+                last_error = e
+                if attempt >= _MAX_QUERY_RETRIES:
+                    raise
+                wait = _compute_retry_wait(e, attempt)
+                elapsed = time.perf_counter() - retry_start
+                if elapsed + wait > _MAX_TOTAL_RETRY_SECS:
+                    raise
+                if self._on_rate_limit:
+                    self._on_rate_limit(wait, attempt + 1, _MAX_QUERY_RETRIES)
+                time.sleep(wait)
+                continue
+
+            # Success — track costs and return
+            query_cost = self.session_costs.add_query(
+                result.usage_summary,
+                result.execution_time,
+            )
+            self.conversation_history.append({
+                "question": question,
+                "answer": result.response[:2000],
+            })
+            return result.response, query_cost
+
+        # All retries exhausted (shouldn't reach here — raise above covers it)
+        raise last_error  # type: ignore[misc]
+
+    def _build_context_payload(self) -> dict:
+        """Build a token-trimmed context payload for the RLM."""
+        catalog = self.index.get_catalog()
+        slim_catalog = [
+            {
+                k: (v[:3] if k == "keywords" and isinstance(v, list) else v)
+                for k, v in entry.items()
+                if k != "youtube_url"
+            }
+            for entry in catalog
+        ]
+        return {
+            "catalog": slim_catalog,
             "transcript_dir": self.index.transcript_dir,
-            "conversation_history": self.conversation_history[-10:],  # Last 10 exchanges
+            "youtube_urls": {ep["slug"]: ep["youtube_url"] for ep in catalog},
+            "conversation_history": self._trimmed_history(),
         }
 
-        result = self.rlm.completion(
-            prompt=context_payload,
-            root_prompt=question,
-        )
-
-        # Track costs
-        query_cost = self.session_costs.add_query(
-            result.usage_summary,
-            result.execution_time,
-        )
-
-        # Update conversation history for follow-up context
-        self.conversation_history.append({
-            "question": question,
-            "answer": result.response[:2000],  # Truncate for context management
-        })
-
-        return result.response, query_cost
+    def _trimmed_history(self) -> list[dict]:
+        """Adaptive trimming: recent turns full, older turns compressed."""
+        recent = self.conversation_history[-3:]
+        older = self.conversation_history[-7:-3]
+        trimmed_older = [
+            {"question": h.get("question", ""), "answer": h.get("answer", "")[:300]}
+            for h in older
+        ]
+        trimmed_recent = [
+            {"question": h.get("question", ""), "answer": h.get("answer", "")[:1500]}
+            for h in recent
+        ]
+        return trimmed_older + trimmed_recent
 
     def close(self):
         """Clean up resources."""

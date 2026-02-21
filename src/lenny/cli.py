@@ -263,11 +263,20 @@ def main():
                         theme=current_theme,
                     )
                     engine.rlm.logger = progress
+
+                    # Wire rate-limit callback to update progress spinner
+                    def _on_rate_limit(wait_secs, attempt, max_attempts):
+                        progress.set_status(
+                            PROGRESS_LABELS["rate_limited"].format(wait=int(wait_secs))
+                        )
+
+                    engine._on_rate_limit = _on_rate_limit
                     try:
                         with progress:
                             answer, query_cost = engine.query(query)
                     finally:
                         engine.rlm.logger = None
+                        engine._on_rate_limit = None
                 # engine.query() already appends to conversation_history — add mode tag
                 if engine.conversation_history:
                     engine.conversation_history[-1]["mode"] = "research"
@@ -275,7 +284,17 @@ def main():
             console.print("\n[faint]Query interrupted.[/faint]")
             continue
         except Exception as e:
-            console.print(f"\n[error]Error:[/error] {e}")
+            from lenny.engine import is_rate_limit_error, _MAX_QUERY_RETRIES
+            if is_rate_limit_error(e):
+                console.print(
+                    f"\n[warning]Rate limit reached after "
+                    f"{_MAX_QUERY_RETRIES + 1} attempts.[/warning] "
+                    "The API's per-minute token quota was exceeded.\n"
+                    "  Wait a minute and try again, or use "
+                    "[accent]/mode fast[/accent] for a lighter query."
+                )
+            else:
+                console.print(f"\n[error]Error:[/error] {e}")
             continue
 
         # Display answer (with terminal-friendly citation URLs)

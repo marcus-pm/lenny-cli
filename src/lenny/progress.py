@@ -125,6 +125,12 @@ class ProgressDisplay:
         if self._live is not None:
             self._live.update(self._build_renderable())
 
+    def set_status(self, text: str) -> None:
+        """Update the spinner status text from outside the RLM logger flow."""
+        self._current_status = text
+        if self._live is not None:
+            self._live.update(self._build_renderable())
+
     @property
     def iteration_count(self) -> int:
         return self._iteration_count

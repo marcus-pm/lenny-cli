@@ -57,7 +57,7 @@ class RAGEngine:
     ):
         self.search_index = search_index
         self.model = model
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
 
     def query(
         self,
