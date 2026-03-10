@@ -486,7 +486,7 @@ Your REPL is initialized with:
 
 1. A `context` variable — a JSON dict containing:
    - `"catalog"`: a list of episode dicts, each with: slug, guest, title, publish_date, duration, keywords
-   - `"youtube_urls"`: a `{slug: url}` lookup dict for YouTube links (use this for citation URLs)
+   - `"youtube_urls"`: a `{{slug: url}}` lookup dict for YouTube links (use this for citation URLs)
    - `"transcript_dir"`: the filesystem path to the episodes directory
    - `"conversation_history"`: list of prior Q&A pairs from this session (for follow-up context)
 
@@ -502,7 +502,7 @@ Your REPL is initialized with:
 
 ## How to Load a Transcript
 
-Each episode transcript is a markdown file at: `{transcript_dir}/{slug}/transcript.md`
+Each episode transcript is a markdown file at: `{{transcript_dir}}/{{slug}}/transcript.md`
 
 To load a transcript:
 ```repl
