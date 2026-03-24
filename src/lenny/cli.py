@@ -132,9 +132,8 @@ def main():
     mcp_client = None
     transcript_cache = TranscriptCache()
     index = None
-    search_index = None  # only used in fallback mode
 
-    # Try MCP-first startup
+    # MCP connection is required
     mcp_token = os.environ.get("LENNY_MCP_TOKEN", "").strip()
     if mcp_token:
         mcp_client = MCPClient(token=mcp_token)
@@ -146,58 +145,32 @@ def main():
                         f"  [success]\u2713[/success] {len(index.episodes)} episodes loaded via MCP"
                     )
                 else:
-                    console.print("  [warning]MCP server unreachable — trying local fallback[/warning]")
-                    mcp_client = None
+                    console.print()
+                    console.print("[error]MCP server unreachable.[/error]")
+                    console.print("  LENNY_MCP_TOKEN is set but the server did not respond.")
+                    console.print("  Check your internet connection or try again later.")
+                    console.print()
+                    sys.exit(1)
             except MCPError as e:
-                console.print(f"  [warning]MCP connection failed: {e}[/warning]")
-                console.print("  [faint]Trying local transcript fallback...[/faint]")
-                mcp_client = None
-    else:
-        console.print("  [faint]No LENNY_MCP_TOKEN set — using local transcripts[/faint]")
-
-    # Fallback: load from local transcripts if MCP unavailable
-    if index is None:
-        from lenny.transcripts import ensure_transcripts  # noqa: E402
-
-        try:
-            transcript_dir = ensure_transcripts(console)
-        except FileNotFoundError as e:
-            if not mcp_token:
-                console.print(
-                    "\n[error]No transcripts available.[/error]\n"
-                    "  Set LENNY_MCP_TOKEN in your environment or config to use the MCP server,\n"
-                    "  or run `lenny` with internet access to download transcripts."
-                )
-            else:
-                console.print(f"[error]Error:[/error] {e}")
-            sys.exit(1)
-
-        with console.status("[accent]Loading transcripts...[/accent]"):
-            try:
-                index = TranscriptIndex.load(transcript_dir)
-            except FileNotFoundError as e:
-                console.print(f"[error]Error:[/error] {e}")
+                console.print()
+                console.print(f"[error]MCP connection failed:[/error] {e}")
+                console.print("  Check your internet connection or try again later.")
+                console.print()
                 sys.exit(1)
-
-        console.print(f"  [success]\u2713[/success] {len(index.episodes)} episodes loaded (local)")
-
-        # Build BM25 search index (fallback path only)
-        try:
-            from lenny.search import TranscriptSearchIndex
-        except ImportError:
-            console.print(
-                "[error]rank-bm25 not installed.[/error] "
-                "Install with: pip install 'lenny-cli[local]'"
-            )
-            sys.exit(1)
-
-        bm25_cache_path = os.path.join(
-            os.path.dirname(index.transcript_dir), ".cache", "bm25_index.json",
-        )
-        with console.status("[accent]Loading search index...[/accent]"):
-            search_index = TranscriptSearchIndex.load_or_build(index, bm25_cache_path)
-
-        console.print(f"  [success]\u2713[/success] {len(search_index.chunks):,} chunks indexed")
+    else:
+        console.print()
+        console.print("[error]MCP server token required.[/error]")
+        console.print()
+        console.print("  Lenny requires a connection to the MCP data server.")
+        console.print("  Get your access token at:")
+        console.print()
+        console.print("    [accent]https://www.lennysdata.com/access/mcp?tab=claude-code[/accent]")
+        console.print()
+        console.print("  Then set it in your environment:")
+        console.print()
+        console.print("    [faint]export LENNY_MCP_TOKEN=your-token-here[/faint]")
+        console.print()
+        sys.exit(1)
 
     console.print()
 
@@ -213,7 +186,6 @@ def main():
         rag = RAGEngine(
             api_key=key,
             mcp_client=mcp_client,
-            search_index=search_index,
         )
         return eng, rag
 

@@ -14,7 +14,6 @@ from lenny.costs import QueryCost, make_query_cost_from_usage
 
 if TYPE_CHECKING:
     from lenny.mcp_client import MCPClient
-    from lenny.search import TranscriptSearchIndex
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +25,6 @@ _MAX_SNIPPETS_PER_EPISODE = 3
 
 # Max total snippets to send to Haiku
 _MAX_TOTAL_SNIPPETS = 15
-
-# BM25 score threshold (fallback mode only)
-_RELEVANCE_THRESHOLD = 5.0
 
 INSUFFICIENT_EVIDENCE = (
     "I couldn't find enough relevant information in the podcast transcripts "
@@ -51,17 +47,15 @@ Answer the user's question using ONLY the provided transcript excerpts.
 
 
 class RAGEngine:
-    """Fast query path: MCP search (or BM25 fallback) + single Haiku synthesis call."""
+    """Fast query path: MCP search + single Haiku synthesis call."""
 
     def __init__(
         self,
         api_key: str,
         mcp_client: MCPClient | None = None,
-        search_index: TranscriptSearchIndex | None = None,
         model: str = RAG_MODEL,
     ):
         self.mcp_client = mcp_client
-        self.search_index = search_index  # fallback for offline mode
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
 
@@ -72,7 +66,6 @@ class RAGEngine:
     ) -> tuple[str, QueryCost]:
         """Run a RAG query: search → deduplicate → Haiku synthesis.
 
-        Uses MCP search_content when available, falls back to BM25.
         Returns (answer_text, query_cost).
         """
         start_time = time.perf_counter()
@@ -80,8 +73,6 @@ class RAGEngine:
 
         if self.mcp_client is not None:
             excerpts_text = self._search_via_mcp(question)
-        elif self.search_index is not None:
-            excerpts_text = self._search_via_bm25(question)
         else:
             excerpts_text = None
 
@@ -135,9 +126,7 @@ class RAGEngine:
                 query=question, content_type="podcast", limit=20,
             )
         except Exception as e:
-            logger.warning("MCP search failed, trying BM25 fallback: %s", e)
-            if self.search_index is not None:
-                return self._search_via_bm25(question)
+            logger.warning("MCP search failed: %s", e)
             return None
 
         entries = results.get("results", [])
@@ -201,42 +190,6 @@ class RAGEngine:
             lines.append(
                 f"### Excerpt {i}: {snip['guest']} — *{snip['title']}*\n\n"
                 f"{snip['text']}\n"
-            )
-        return "\n".join(lines)
-
-    # ------------------------------------------------------------------
-    # BM25 fallback path (offline / legacy)
-    # ------------------------------------------------------------------
-    def _search_via_bm25(self, question: str) -> str | None:
-        """Search using the local BM25 index (fallback)."""
-        results = self.search_index.search_with_scores(question, top_k=30)
-
-        if not results or results[0][1] < _RELEVANCE_THRESHOLD:
-            return None
-
-        # Deduplicate: keep top N chunks per episode
-        per_episode: dict[str, list[tuple]] = defaultdict(list)
-        for chunk, score in results:
-            if len(per_episode[chunk.episode_slug]) < _MAX_SNIPPETS_PER_EPISODE:
-                per_episode[chunk.episode_slug].append((chunk, score))
-
-        all_kept = []
-        for ep_chunks in per_episode.values():
-            all_kept.extend(ep_chunks)
-        all_kept.sort(key=lambda x: x[1], reverse=True)
-        all_kept = all_kept[:_MAX_TOTAL_SNIPPETS]
-
-        return self._format_bm25_excerpts(all_kept)
-
-    @staticmethod
-    def _format_bm25_excerpts(chunks_with_scores: list[tuple]) -> str:
-        """Format BM25 chunks for the Haiku prompt."""
-        lines = ["## Transcript Excerpts\n"]
-        for i, (chunk, score) in enumerate(chunks_with_scores, 1):
-            lines.append(
-                f"### Excerpt {i}: {chunk.guest} — *{chunk.title}*\n"
-                f"**Episode:** [{chunk.title}]({chunk.youtube_url})\n\n"
-                f"{chunk.text}\n"
             )
         return "\n".join(lines)
 
