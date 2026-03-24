@@ -433,15 +433,20 @@ def _build_safe_pathlib(real_pathlib, restricted_open_fn):
 
 _SANDBOX_APPLIED = False
 
+# Module-level holders for MCP helpers that get injected into the REPL.
+# Set by LennyEngine.__init__ before the first completion call.
+_MCP_HELPERS: dict[str, object] = {}
+
 
 def _apply_repl_sandbox(transcript_dir: str) -> None:
-    """Monkeypatch LocalREPL.setup() to inject restricted open/import.
+    """Monkeypatch LocalREPL.setup() to inject restricted open/import and MCP helpers.
 
     After the original setup() builds the namespace we replace the builtins
     with restricted versions that:
       - Only allow reading files under the transcripts directory and the
         REPL's own temp directory (used by load_context for JSON context).
       - Block importing dangerous modules (subprocess, socket, http, …).
+      - Inject search_transcripts, fetch_transcript, read_excerpt helpers.
 
     Must be called BEFORE any RLM.completion() call.
     """
@@ -456,7 +461,7 @@ def _apply_repl_sandbox(transcript_dir: str) -> None:
     def _sandboxed_setup(self):
         _original_setup(self)
 
-        # Allowed dirs: transcripts + the REPL's temp dir (for context JSON)
+        # Allowed dirs: transcripts/cache + the REPL's temp dir (for context JSON)
         allowed_dirs = [transcript_dir]
         if hasattr(self, "temp_dir") and self.temp_dir:
             allowed_dirs.append(self.temp_dir)
@@ -468,6 +473,10 @@ def _apply_repl_sandbox(transcript_dir: str) -> None:
             _BLOCKED_MODULES, restricted_open_fn,
         )
 
+        # Inject MCP helper functions into the REPL namespace
+        for name, func in _MCP_HELPERS.items():
+            self.globals[name] = func
+
     LocalREPL.setup = _sandboxed_setup
     _SANDBOX_APPLIED = True
 
@@ -477,8 +486,8 @@ def _apply_repl_sandbox(transcript_dir: str) -> None:
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = textwrap.dedent("""\
 You are a research assistant specialized in analyzing Lenny's Podcast transcripts. \
-You have access to a REPL environment with a catalog of podcast episodes and the ability \
-to read full transcript files and query sub-LLMs for analysis.
+You have access to a REPL environment with a catalog of podcast episodes, transcript \
+search and retrieval functions, and the ability to query sub-LLMs for analysis.
 
 ## REPL Environment
 
@@ -486,38 +495,71 @@ Your REPL is initialized with:
 
 1. A `context` variable — a JSON dict containing:
    - `"catalog"`: a list of episode dicts, each with: slug, guest, title, publish_date, duration, keywords
-   - `"youtube_urls"`: a `{{slug: url}}` lookup dict for YouTube links (use this for citation URLs)
-   - `"transcript_dir"`: the filesystem path to the episodes directory
+   - `"youtube_urls"`: a `{slug: url}` lookup dict for YouTube links (use this for citation URLs)
+   - `"transcript_dir"`: the filesystem path to locally cached transcripts
    - `"conversation_history"`: list of prior Q&A pairs from this session (for follow-up context)
 
-2. `llm_query(prompt: str) -> str` — call a sub-LLM (handles ~500K chars). Use this for analyzing transcript chunks.
+2. `search_transcripts(query: str, limit: int = 20) -> list[dict]` — **server-side full-text search** \
+across all podcast transcripts. Returns a list of matching episodes with snippets. Supports \
+pipe-delimited alternatives like `"pricing|tier|package"`. Each result contains: title, guest, \
+filename, snippets (with text and matched_terms), and match_count. **Use this as your first step** \
+to find relevant episodes — it is much faster than loading transcripts one by one.
 
-3. `llm_query_batched(prompts: list[str]) -> list[str]` — concurrent sub-LM calls (rate-limited to avoid API throttling). Use for processing multiple chunks in parallel.
+3. `fetch_transcript(slug: str) -> str` — download and cache a full transcript. Returns the \
+complete transcript text. The transcript is also saved locally so you can use `open()` for \
+subsequent reads (at `{transcript_dir}/{slug}/transcript.md`). Call this when you need the \
+full text for detailed regex extraction or reading.
 
-4. `SHOW_VARS()` — see all variables you've created.
+4. `read_excerpt(slug: str, query: str = "", radius: int = 280) -> dict` — read a focused excerpt \
+from a transcript around a query match. Returns a dict with: excerpt text, matched_terms, \
+start/end position, total_excerpts. Faster than fetch_transcript when you only need a passage.
 
-5. `print()` — view intermediate results (outputs are truncated, so store important data in variables).
+5. `llm_query(prompt: str) -> str` — call a sub-LLM (handles ~500K chars). Use this for analyzing transcript chunks.
 
-6. `open()` — read transcript files from disk.
+6. `llm_query_batched(prompts: list[str]) -> list[str]` — concurrent sub-LM calls (rate-limited to avoid API throttling). Use for processing multiple chunks in parallel.
+
+7. `SHOW_VARS()` — see all variables you've created.
+
+8. `print()` — view intermediate results (outputs are truncated, so store important data in variables).
+
+9. `open()` — read locally cached transcript files. Works on transcripts previously fetched via `fetch_transcript()`.
 
 ## How to Load a Transcript
 
-Each episode transcript is a markdown file at: `{{transcript_dir}}/{{slug}}/transcript.md`
-
-To load a transcript:
+**Option A — Search first (recommended):**
 ```repl
-slug = "brian-chesky"
-with open(f"{{context['transcript_dir']}}/{{slug}}/transcript.md", "r") as f:
-    transcript = f.read()
+# Find episodes about a topic using server-side search
+results = search_transcripts("founder mode|delegation")
+for r in results[:5]:
+    print(f"{{r['guest']}} — {{r['title']}} ({{r['match_count']}} matches)")
+    for s in r.get('snippets', [])[:1]:
+        print(f"  Snippet: {{s['text'][:200]}}...")
+```
+
+**Option B — Fetch a full transcript by slug:**
+```repl
+transcript = fetch_transcript("brian-chesky")
 print(transcript[:500])  # Preview
+```
+
+**Option C — Read a focused excerpt without loading the full transcript:**
+```repl
+excerpt = read_excerpt("brian-chesky", query="founder mode", radius=500)
+print(excerpt["excerpt"])
+```
+
+After calling `fetch_transcript(slug)`, you can also use `open()`:
+```repl
+with open(f"{{context['transcript_dir']}}/{{slug}}/transcript.md", "r") as f:
+    text = f.read()
 ```
 
 ## Security Restrictions
 
-File access is restricted to the transcripts directory only. You cannot read files \
-outside of the transcripts path. Write access is not available. Some Python modules \
+File access is restricted to the transcripts cache directory only. You cannot read files \
+outside of this path. Write access is not available. Some Python modules \
 (subprocess, socket, http, urllib) are blocked. Use the available tools \
-(open, re, json, os.path) for transcript analysis.
+(search_transcripts, fetch_transcript, read_excerpt, open, re, json, os.path) for transcript analysis.
 
 ## Rate Limit Awareness
 
@@ -529,32 +571,36 @@ The system automatically handles rate limiting with throttling and retries. Foll
 
 ## Recommended Strategy
 
-1. **Identify relevant episodes**: Search the catalog by guest name, title, or keywords. Use Python string/list operations on `context["catalog"]`.
+1. **Search for relevant episodes** using `search_transcripts(query)`:
+```repl
+results = search_transcripts("pricing|monetization|freemium")
+print(f"Found {{len(results)}} episodes")
+for r in results[:10]:
+    print(f"  {{r['guest']}} — {{r['title']}} ({{r['match_count']}} matches)")
+```
 
-2. **Search and extract relevant sections** (NO sub-LM needed for this step):
+2. **Fetch full transcripts** for the most relevant episodes and extract sections:
 ```repl
 import re
 relevant_excerpts = []
-for ep in context["catalog"]:
-    path = f"{{context['transcript_dir']}}/{{ep['slug']}}/transcript.md"
-    with open(path, "r") as f:
-        text = f.read()
-    # Find paragraphs containing the topic
-    paragraphs = text.split("\\n\\n")
+for r in results[:8]:  # Top 8 episodes by relevance
+    slug = r["filename"].removeprefix("podcasts/").removesuffix(".md")
+    transcript = fetch_transcript(slug)
+    paragraphs = transcript.split("\\n\\n")
     for p in paragraphs:
-        if re.search(r"your_pattern", p, re.IGNORECASE):
+        if re.search(r"pric|monetiz|freemium", p, re.IGNORECASE):
             relevant_excerpts.append({{
-                "guest": ep["guest"],
-                "title": ep["title"],
-                "youtube_url": context["youtube_urls"].get(ep["slug"], ""),
-                "excerpt": p[:3000]  # Keep excerpts small
+                "guest": r["guest"],
+                "title": r["title"],
+                "slug": slug,
+                "youtube_url": context["youtube_urls"].get(slug, ""),
+                "excerpt": p[:3000]
             }})
-print(f"Found {{len(relevant_excerpts)}} relevant excerpts")
+print(f"Found {{len(relevant_excerpts)}} relevant excerpts from {{len(results[:8])}} episodes")
 ```
 
 3. **Analyze excerpts with sub-LLMs** (send small, focused prompts):
 ```repl
-# Group excerpts into small batches and send focused prompts
 batch_size = 3
 for i in range(0, len(relevant_excerpts), batch_size):
     batch = relevant_excerpts[i:i+batch_size]
@@ -618,40 +664,50 @@ class LennyEngine:
     def __init__(
         self,
         index: TranscriptIndex,
+        api_key: str | None = None,
         verbose: bool = False,
         max_iterations: int = 30,
+        mcp_client: object | None = None,
+        cache: object | None = None,
     ):
         # Apply runtime patches lazily (not at import time)
         _apply_throttle_patch()
-        _apply_repl_sandbox(index.transcript_dir)
 
         self.index = index
+        self.mcp_client = mcp_client
+        self.cache = cache
         self.verbose = verbose
         self.max_iterations = max_iterations
         self.session_costs = SessionCosts()
         self.conversation_history: list[dict[str, str]] = []
         self._on_rate_limit: Callable[[float, int, int], None] | None = None
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # Build and register MCP helper functions for the REPL sandbox
+        self._register_mcp_helpers()
+
+        _apply_repl_sandbox(index.transcript_dir)
+
+        # Resolve API key: explicit param > env var
+        if not api_key:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise EnvironmentError(
                 "ANTHROPIC_API_KEY not found.\n"
-                "  Option 1: Add it to .env in the project root:\n"
-                f"           echo 'ANTHROPIC_API_KEY=sk-ant-...' >> {_PROJECT_ROOT / '.env'}\n"
-                "  Option 2: Export it in your shell:\n"
-                "           export ANTHROPIC_API_KEY=sk-ant-..."
+                "Run `lenny` in an interactive terminal to set it up, or set it manually:\n"
+                "  export ANTHROPIC_API_KEY=sk-ant-..."
             )
+        self._api_key = api_key
 
         self.rlm = RLM(
             backend="anthropic",
             backend_kwargs={
-                "api_key": api_key,
+                "api_key": self._api_key,
                 "model_name": ROOT_MODEL,
                 "max_tokens": 16384,
             },
             other_backends=["anthropic"],
             other_backend_kwargs=[{
-                "api_key": api_key,
+                "api_key": self._api_key,
                 "model_name": SUB_MODEL,
                 "max_tokens": 8192,
             }],
@@ -663,10 +719,118 @@ class LennyEngine:
             persistent=False,  # We manage context ourselves per query
         )
 
+    def _register_mcp_helpers(self) -> None:
+        """Build MCP helper functions and register them for REPL injection."""
+        global _MCP_HELPERS
+
+        if self.mcp_client is None:
+            return
+
+        mcp = self.mcp_client
+        cache = self.cache
+        index = self.index
+
+        def search_transcripts(query: str, limit: int = 20) -> list[dict]:
+            """Search across all podcast transcripts using the MCP server.
+
+            Args:
+                query: Search terms. Use pipe-delimited alternatives for
+                    synonyms, e.g. "pricing|tier|package".
+                limit: Max results to return (default 20).
+
+            Returns:
+                List of dicts with: guest, title, filename, snippets,
+                matched_terms, match_count.
+            """
+            try:
+                result = mcp.search_content(
+                    query=query, content_type="podcast", limit=limit,
+                )
+                return result.get("results", [])
+            except Exception as e:
+                return [{"error": f"Search failed: {e}"}]
+
+        def fetch_transcript(slug: str) -> str:
+            """Fetch and cache a full podcast transcript.
+
+            Downloads the transcript from the MCP server on first call,
+            caches it locally for subsequent reads via open().
+
+            Args:
+                slug: Episode slug (e.g. "brian-chesky").
+
+            Returns:
+                Full transcript text (without YAML frontmatter).
+            """
+            # Check cache first
+            if cache is not None:
+                cached = cache.get(slug)
+                if cached is not None:
+                    return _strip_frontmatter(cached)
+
+            # Determine the MCP filename
+            episode = index.episodes.get(slug)
+            filename = episode.filename if episode else f"podcasts/{slug}.md"
+
+            try:
+                content = mcp.read_content(filename)
+            except Exception as e:
+                return f"Error fetching transcript for '{slug}': {e}"
+
+            # Cache the raw content (with frontmatter)
+            if cache is not None:
+                cache.put(slug, content)
+
+            # Backfill metadata if available
+            if episode is not None:
+                index._backfill_metadata(episode, content)
+
+            return _strip_frontmatter(content)
+
+        def read_excerpt(
+            slug: str, query: str = "", radius: int = 280,
+        ) -> dict:
+            """Read a focused excerpt from a transcript around a query match.
+
+            Faster than fetch_transcript when you only need a specific passage.
+
+            Args:
+                slug: Episode slug (e.g. "brian-chesky").
+                query: Search term to find the excerpt around.
+                radius: Approximate character radius around the match.
+
+            Returns:
+                Dict with: excerpt, matched_terms, start_char, end_char,
+                total_excerpts.
+            """
+            episode = index.episodes.get(slug)
+            filename = episode.filename if episode else f"podcasts/{slug}.md"
+
+            try:
+                return mcp.read_excerpt(
+                    filename=filename, query=query, radius=radius,
+                )
+            except Exception as e:
+                return {"error": f"Excerpt retrieval failed: {e}"}
+
+        def _strip_frontmatter(content: str) -> str:
+            """Strip YAML frontmatter from markdown content."""
+            import re as _re
+            match = _re.match(r"^---\n.*?\n---\n", content, _re.DOTALL)
+            if match:
+                content = content[match.end():]
+            return content.strip()
+
+        _MCP_HELPERS.update({
+            "search_transcripts": search_transcripts,
+            "fetch_transcript": fetch_transcript,
+            "read_excerpt": read_excerpt,
+        })
+
     @property
     def api_key(self) -> str:
         """Return the Anthropic API key (for shared use by RAGEngine)."""
-        return os.environ.get("ANTHROPIC_API_KEY", "")
+        return self._api_key
 
     def query(self, question: str) -> tuple[str, QueryCost]:
         """Run a question through the RLM engine.

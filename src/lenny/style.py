@@ -287,6 +287,7 @@ def build_splash_card(
     active_mode: str,
     theme: LennyTheme,
     console: Console,
+    auth_label: str = "",
 ) -> Text:
     """Build the full startup splash card as a ``rich.text.Text`` object.
 
@@ -309,7 +310,11 @@ def build_splash_card(
     # Status line
     text.append(f"  {episode_count} episodes loaded", style=Style(color=CREAM))
     text.append("  \u00b7  ", style=Style(color=GRAY_DARK))
-    text.append(f"mode: {active_mode}\n", style=Style(color=CREAM_DIM))
+    text.append(f"mode: {active_mode}", style=Style(color=CREAM_DIM))
+    if auth_label:
+        text.append("  \u00b7  ", style=Style(color=GRAY_DARK))
+        text.append(auth_label, style=Style(color=CREAM_DIM))
+    text.append("\n", style=Style())
 
     # Daily prompt example (warm theme only)
     if theme.show_daily_prompt:
@@ -318,7 +323,7 @@ def build_splash_card(
 
     # Command bar
     text.append(
-        "\n  /help  /episodes  /cost  /mode  /theme  /quit\n",
+        "\n  /help  /episodes  /cost  /mode  /auth  /theme  /quit\n",
         style=Style(color=GRAY_DARK),
     )
 
@@ -404,6 +409,7 @@ HELP_TEXT = """\
   /episodes  List loaded episodes (count + sample)
   /cost      Show session token usage and cost
   /mode      Show or set routing mode (auto, fast, research)
+  /auth      Manage API key authentication
   /theme     Switch visual theme (warm, minimal)
   /verbose   Toggle verbose mode (see research orchestration)
   /quit      Exit

@@ -1,7 +1,8 @@
-"""RAG engine — fast retrieve-then-generate path using BM25 + single Haiku call."""
+"""RAG engine — fast retrieve-then-generate path using MCP search + single Haiku call."""
 
 from __future__ import annotations
 
+import logging
 import time
 import textwrap
 from collections import defaultdict
@@ -12,19 +13,22 @@ import anthropic
 from lenny.costs import QueryCost, make_query_cost_from_usage
 
 if TYPE_CHECKING:
+    from lenny.mcp_client import MCPClient
     from lenny.search import TranscriptSearchIndex
+
+logger = logging.getLogger(__name__)
 
 # Model used for RAG synthesis
 RAG_MODEL = "claude-haiku-4-5-20251001"
 
-# BM25 score threshold — below this, excerpts are too weak to synthesize
+# Max snippets per episode to avoid one episode dominating the context
+_MAX_SNIPPETS_PER_EPISODE = 3
+
+# Max total snippets to send to Haiku
+_MAX_TOTAL_SNIPPETS = 15
+
+# BM25 score threshold (fallback mode only)
 _RELEVANCE_THRESHOLD = 5.0
-
-# Max chunks per episode to avoid one episode dominating the context
-_MAX_CHUNKS_PER_EPISODE = 3
-
-# Max total chunks to send to Haiku
-_MAX_TOTAL_CHUNKS = 15
 
 INSUFFICIENT_EVIDENCE = (
     "I couldn't find enough relevant information in the podcast transcripts "
@@ -47,15 +51,17 @@ Answer the user's question using ONLY the provided transcript excerpts.
 
 
 class RAGEngine:
-    """Fast query path: BM25 retrieval + single Haiku synthesis call."""
+    """Fast query path: MCP search (or BM25 fallback) + single Haiku synthesis call."""
 
     def __init__(
         self,
-        search_index: TranscriptSearchIndex,
         api_key: str,
+        mcp_client: MCPClient | None = None,
+        search_index: TranscriptSearchIndex | None = None,
         model: str = RAG_MODEL,
     ):
-        self.search_index = search_index
+        self.mcp_client = mcp_client
+        self.search_index = search_index  # fallback for offline mode
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
 
@@ -64,18 +70,23 @@ class RAGEngine:
         question: str,
         conversation_history: list[dict] | None = None,
     ) -> tuple[str, QueryCost]:
-        """Run a RAG query: BM25 search → deduplicate → Haiku synthesis.
+        """Run a RAG query: search → deduplicate → Haiku synthesis.
 
+        Uses MCP search_content when available, falls back to BM25.
         Returns (answer_text, query_cost).
         """
         start_time = time.perf_counter()
         history = conversation_history or []
 
-        # 1. Retrieve with scores
-        results = self.search_index.search_with_scores(question, top_k=30)
+        if self.mcp_client is not None:
+            excerpts_text = self._search_via_mcp(question)
+        elif self.search_index is not None:
+            excerpts_text = self._search_via_bm25(question)
+        else:
+            excerpts_text = None
 
-        # 2. Relevance gate — if best score is too low, bail out
-        if not results or results[0][1] < _RELEVANCE_THRESHOLD:
+        # Relevance gate
+        if excerpts_text is None:
             elapsed = time.perf_counter() - start_time
             cost = make_query_cost_from_usage(
                 model=self.model,
@@ -85,23 +96,8 @@ class RAGEngine:
             )
             return INSUFFICIENT_EVIDENCE, cost
 
-        # 3. Deduplicate: keep top N chunks per episode
-        per_episode: dict[str, list[tuple]] = defaultdict(list)
-        for chunk, score in results:
-            if len(per_episode[chunk.episode_slug]) < _MAX_CHUNKS_PER_EPISODE:
-                per_episode[chunk.episode_slug].append((chunk, score))
-
-        # Flatten and sort by score, then cap total
-        all_kept = []
-        for ep_chunks in per_episode.values():
-            all_kept.extend(ep_chunks)
-        all_kept.sort(key=lambda x: x[1], reverse=True)
-        all_kept = all_kept[:_MAX_TOTAL_CHUNKS]
-
-        # 4. Build the user prompt
-        excerpts_text = self._format_excerpts(all_kept)
+        # Build the user prompt
         history_text = self._format_history(history)
-
         user_message = f"""{excerpts_text}
 
 {history_text}
@@ -109,7 +105,7 @@ class RAGEngine:
 ## Question
 {question}"""
 
-        # 5. Call Haiku
+        # Call Haiku
         response = self.client.messages.create(
             model=self.model,
             max_tokens=4096,
@@ -120,7 +116,6 @@ class RAGEngine:
         answer = response.content[0].text
         elapsed = time.perf_counter() - start_time
 
-        # 6. Build cost from usage
         cost = make_query_cost_from_usage(
             model=self.model,
             input_tokens=response.usage.input_tokens,
@@ -131,11 +126,111 @@ class RAGEngine:
         return answer, cost
 
     # ------------------------------------------------------------------
-    # Prompt formatting helpers
+    # MCP search path
     # ------------------------------------------------------------------
+    def _search_via_mcp(self, question: str) -> str | None:
+        """Search using the MCP server's search_content tool."""
+        try:
+            results = self.mcp_client.search_content(
+                query=question, content_type="podcast", limit=20,
+            )
+        except Exception as e:
+            logger.warning("MCP search failed, trying BM25 fallback: %s", e)
+            if self.search_index is not None:
+                return self._search_via_bm25(question)
+            return None
+
+        entries = results.get("results", [])
+        if not entries:
+            return None
+
+        # Flatten snippets from all results, with episode metadata
+        all_snippets: list[dict] = []
+        for entry in entries:
+            # search_content doesn't always include 'guest' — extract from filename
+            guest = entry.get("guest", "")
+            if not guest:
+                # Derive from filename: "podcasts/anneka-gupta.md" → "Anneka Gupta"
+                fn = entry.get("filename", "")
+                slug = fn.removeprefix("podcasts/").removesuffix(".md")
+                guest = slug.replace("-", " ").title() if slug else ""
+            title = entry.get("title", "")
+            filename = entry.get("filename", "")
+            for snippet_obj in entry.get("snippets", []):
+                all_snippets.append({
+                    "guest": guest,
+                    "title": title,
+                    "filename": filename,
+                    "text": snippet_obj.get("text", ""),
+                    "match_count": snippet_obj.get("match_count", 0),
+                })
+            # If no snippets list, use the top-level snippet
+            if not entry.get("snippets") and entry.get("snippet"):
+                all_snippets.append({
+                    "guest": guest,
+                    "title": title,
+                    "filename": filename,
+                    "text": entry["snippet"],
+                    "match_count": entry.get("match_count", 0),
+                })
+
+        if not all_snippets:
+            return None
+
+        # Deduplicate: max N snippets per episode
+        per_episode: dict[str, list[dict]] = defaultdict(list)
+        for snip in all_snippets:
+            key = snip["filename"]
+            if len(per_episode[key]) < _MAX_SNIPPETS_PER_EPISODE:
+                per_episode[key].append(snip)
+
+        # Flatten, sort by match_count, cap total
+        all_kept = []
+        for ep_snips in per_episode.values():
+            all_kept.extend(ep_snips)
+        all_kept.sort(key=lambda x: x.get("match_count", 0), reverse=True)
+        all_kept = all_kept[:_MAX_TOTAL_SNIPPETS]
+
+        return self._format_mcp_excerpts(all_kept)
+
     @staticmethod
-    def _format_excerpts(chunks_with_scores: list[tuple]) -> str:
-        """Format retrieved chunks for the Haiku prompt."""
+    def _format_mcp_excerpts(snippets: list[dict]) -> str:
+        """Format MCP search snippets for the Haiku prompt."""
+        lines = ["## Transcript Excerpts\n"]
+        for i, snip in enumerate(snippets, 1):
+            lines.append(
+                f"### Excerpt {i}: {snip['guest']} — *{snip['title']}*\n\n"
+                f"{snip['text']}\n"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # BM25 fallback path (offline / legacy)
+    # ------------------------------------------------------------------
+    def _search_via_bm25(self, question: str) -> str | None:
+        """Search using the local BM25 index (fallback)."""
+        results = self.search_index.search_with_scores(question, top_k=30)
+
+        if not results or results[0][1] < _RELEVANCE_THRESHOLD:
+            return None
+
+        # Deduplicate: keep top N chunks per episode
+        per_episode: dict[str, list[tuple]] = defaultdict(list)
+        for chunk, score in results:
+            if len(per_episode[chunk.episode_slug]) < _MAX_SNIPPETS_PER_EPISODE:
+                per_episode[chunk.episode_slug].append((chunk, score))
+
+        all_kept = []
+        for ep_chunks in per_episode.values():
+            all_kept.extend(ep_chunks)
+        all_kept.sort(key=lambda x: x[1], reverse=True)
+        all_kept = all_kept[:_MAX_TOTAL_SNIPPETS]
+
+        return self._format_bm25_excerpts(all_kept)
+
+    @staticmethod
+    def _format_bm25_excerpts(chunks_with_scores: list[tuple]) -> str:
+        """Format BM25 chunks for the Haiku prompt."""
         lines = ["## Transcript Excerpts\n"]
         for i, (chunk, score) in enumerate(chunks_with_scores, 1):
             lines.append(
@@ -145,11 +240,12 @@ class RAGEngine:
             )
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # Common helpers
+    # ------------------------------------------------------------------
     @staticmethod
     def _format_history(history: list[dict]) -> str:
         """Format recent RAG-mode conversation history for context."""
-        # Only include RAG-mode entries to avoid confusing Haiku with
-        # RLM's more detailed answers
         rag_history = [h for h in history if h.get("mode") in ("fast", "rag")]
         recent = rag_history[-5:]
         if not recent:
