@@ -31,11 +31,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
 ]
 
-[project.optional-dependencies]
-local = [
-    "rank-bm25>=0.2.2",
-]
-
 [project.urls]
 Homepage = "https://github.com/marcus-pm/lenny-cli"
 Repository = "https://github.com/marcus-pm/lenny-cli"

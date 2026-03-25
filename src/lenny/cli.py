@@ -142,7 +142,7 @@ def main():
                 if mcp_client.health_check():
                     index = TranscriptIndex.load_from_mcp(mcp_client, transcript_cache)
                     console.print(
-                        f"  [success]\u2713[/success] {len(index.episodes)} episodes loaded via MCP"
+                        f"  [success]\u2713[/success] {len(index.episodes)} episodes connected via MCP"
                     )
                 else:
                     console.print()
@@ -417,7 +417,7 @@ def main():
 
 def _show_episodes(index: TranscriptIndex):
     """Show episode count and a sample."""
-    console.print(f"\n  [accent]{len(index.episodes)}[/accent] episodes loaded\n")
+    console.print(f"\n  [accent]{len(index.episodes)}[/accent] episodes available\n")
     sample = list(index.episodes.values())[:10]
     for ep in sample:
         console.print(f"  [faint]{ep.publish_date}[/faint]  {ep.guest} \u2014 [dim]{ep.title}[/dim]")

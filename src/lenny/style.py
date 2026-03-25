@@ -308,7 +308,7 @@ def build_splash_card(
     text.append("  Podcast transcript explorer\n\n", style=Style(color=CREAM_DIM))
 
     # Status line
-    text.append(f"  {episode_count} episodes loaded", style=Style(color=CREAM))
+    text.append(f"  {episode_count} episodes available", style=Style(color=CREAM))
     text.append("  \u00b7  ", style=Style(color=GRAY_DARK))
     text.append(f"mode: {active_mode}", style=Style(color=CREAM_DIM))
     if auth_label:
@@ -406,7 +406,7 @@ def format_save_confirmation(filename: str) -> Text:
 HELP_TEXT = """\
 [accent]Commands[/accent]
   /help      Show this help message
-  /episodes  List loaded episodes (count + sample)
+  /episodes  List available episodes (count + sample)
   /cost      Show session token usage and cost
   /mode      Show or set routing mode (auto, fast, research)
   /auth      Manage API key authentication
