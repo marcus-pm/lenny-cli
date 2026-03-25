@@ -134,43 +134,27 @@ def main():
     index = None
 
     # MCP connection is required
-    mcp_token = os.environ.get("LENNY_MCP_TOKEN", "").strip()
-    if mcp_token:
-        mcp_client = MCPClient(token=mcp_token)
-        with console.status("[accent]Connecting to Lenny's Data...[/accent]"):
-            try:
-                if mcp_client.health_check():
-                    index = TranscriptIndex.load_from_mcp(mcp_client, transcript_cache)
-                    console.print(
-                        f"  [success]\u2713[/success] {len(index.episodes)} episodes connected via MCP"
-                    )
-                else:
-                    console.print()
-                    console.print("[error]MCP server unreachable.[/error]")
-                    console.print("  LENNY_MCP_TOKEN is set but the server did not respond.")
-                    console.print("  Check your internet connection or try again later.")
-                    console.print()
-                    sys.exit(1)
-            except MCPError as e:
+    mcp_token = _ensure_mcp_token()
+    mcp_client = MCPClient(token=mcp_token)
+    with console.status("[accent]Connecting to Lenny's Data...[/accent]"):
+        try:
+            if mcp_client.health_check():
+                index = TranscriptIndex.load_from_mcp(mcp_client, transcript_cache)
+                console.print(
+                    f"  [success]\u2713[/success] {len(index.episodes)} episodes connected via MCP"
+                )
+            else:
                 console.print()
-                console.print(f"[error]MCP connection failed:[/error] {e}")
+                console.print("[error]MCP server unreachable.[/error]")
                 console.print("  Check your internet connection or try again later.")
                 console.print()
                 sys.exit(1)
-    else:
-        console.print()
-        console.print("[error]MCP server token required.[/error]")
-        console.print()
-        console.print("  Lenny requires a connection to the MCP data server.")
-        console.print("  Get your access token at:")
-        console.print()
-        console.print("    [accent]https://www.lennysdata.com/access/mcp?tab=claude-code[/accent]")
-        console.print()
-        console.print("  Then set it in your environment:")
-        console.print()
-        console.print("    [faint]export LENNY_MCP_TOKEN=your-token-here[/faint]")
-        console.print()
-        sys.exit(1)
+        except MCPError as e:
+            console.print()
+            console.print(f"[error]MCP connection failed:[/error] {e}")
+            console.print("  Check your internet connection or try again later.")
+            console.print()
+            sys.exit(1)
 
     console.print()
 
@@ -468,11 +452,27 @@ def _load_auth_config() -> dict | None:
     return None
 
 
-def _save_auth_config(auth_mode: str, api_key: str, label: str = "") -> Path:
-    """Atomically write auth.json with restricted permissions. Returns path."""
+def _save_auth_config(auth_mode: str, api_key: str, label: str = "",
+                      mcp_token: str | None = None) -> Path:
+    """Atomically write auth.json with restricted permissions. Returns path.
+
+    Merges with existing config so that saving one credential doesn't wipe
+    the other (e.g. saving MCP token preserves the API key).
+    """
     path = _auth_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"auth_mode": auth_mode, "api_key": api_key, "label": label}
+    # Read existing config to preserve fields we're not updating
+    existing = _load_auth_config() or {}
+    data = {
+        "auth_mode": auth_mode or existing.get("auth_mode", ""),
+        "api_key": api_key or existing.get("api_key", ""),
+        "label": label or existing.get("label", ""),
+    }
+    # Merge MCP token: explicit param wins, then keep existing
+    if mcp_token is not None:
+        data["mcp_token"] = mcp_token
+    elif existing.get("mcp_token"):
+        data["mcp_token"] = existing["mcp_token"]
     # Atomic write: write to temp file in same dir, then rename
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
@@ -525,6 +525,75 @@ def _load_user_config_env():
     config_path = _legacy_config_path()
     if config_path.is_file():
         load_dotenv(config_path, override=True)
+
+
+def _validate_mcp_token(token: str) -> bool:
+    """Validate an MCP token by attempting a health check.
+
+    Returns True on success, False on auth failure.
+    """
+    from lenny.mcp_client import MCPClient, MCPError
+
+    try:
+        client = MCPClient(token=token)
+        return client.health_check()
+    except MCPError:
+        return False
+
+
+def _ensure_mcp_token() -> str:
+    """Ensure an MCP token is available. Returns the token string.
+
+    Resolution order:
+    1. LENNY_MCP_TOKEN env var
+    2. mcp_token field in auth.json
+    3. Interactive prompt (TTY only)
+    """
+    # 1. Environment variable
+    env_token = os.environ.get("LENNY_MCP_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    # 2. Saved in auth.json
+    auth = _load_auth_config()
+    if auth and auth.get("mcp_token", "").strip():
+        return auth["mcp_token"].strip()
+
+    # 3. Interactive prompt
+    if not sys.stdin.isatty():
+        console.print("[error]MCP server token required.[/error]")
+        console.print("  Set LENNY_MCP_TOKEN or run interactively to configure.")
+        sys.exit(1)
+
+    console.print()
+    console.print("[accent]MCP data connection required[/accent]")
+    console.print("  Lenny needs a token to access podcast transcripts.\n")
+    console.print("  Get your free token at:")
+    console.print("    [accent]https://www.lennysdata.com/access/mcp?tab=claude-code[/accent]\n")
+
+    while True:
+        token = Prompt.ask("  Enter your MCP token", password=True).strip()
+        if not token:
+            console.print("  [warning]Token cannot be empty.[/warning]")
+            continue
+
+        with console.status("  [accent]Validating MCP token...[/accent]"):
+            if _validate_mcp_token(token):
+                break
+            else:
+                console.print("  [warning]Invalid token or server unreachable. Please check and try again.[/warning]")
+
+    if Confirm.ask(f"  Save token to {_auth_config_path()}?", default=True):
+        _save_auth_config(
+            auth_mode=(auth or {}).get("auth_mode", ""),
+            api_key=(auth or {}).get("api_key", ""),
+            label=(auth or {}).get("label", ""),
+            mcp_token=token,
+        )
+        console.print("  [faint]Saved.[/faint]")
+
+    console.print()
+    return token
 
 
 def _run_auth_setup() -> dict:
