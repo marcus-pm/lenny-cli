@@ -368,6 +368,9 @@ def main():
                 )
             else:
                 console.print(f"\n[error]Error:[/error] {e}")
+                if verbose:
+                    import traceback
+                    console.print(f"[faint]{traceback.format_exc()}[/faint]")
             continue
 
         # Display answer (with terminal-friendly citation URLs)
@@ -527,6 +530,18 @@ def _load_user_config_env():
         load_dotenv(config_path, override=True)
 
 
+def _clean_mcp_token(raw: str) -> str:
+    """Strip common paste artifacts from an MCP token.
+
+    Users may copy the full header value ('Bearer eyJ...'), wrap in quotes,
+    or include the claude mcp add command prefix. Normalize to the bare JWT.
+    """
+    token = raw.strip().strip('"').strip("'")
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
 def _validate_mcp_token(token: str) -> bool:
     """Validate an MCP token by attempting a health check.
 
@@ -550,14 +565,15 @@ def _ensure_mcp_token() -> str:
     3. Interactive prompt (TTY only)
     """
     # 1. Environment variable
-    env_token = os.environ.get("LENNY_MCP_TOKEN", "").strip()
+    env_token = _clean_mcp_token(os.environ.get("LENNY_MCP_TOKEN", ""))
     if env_token:
         return env_token
 
     # 2. Saved in auth.json
     auth = _load_auth_config()
-    if auth and auth.get("mcp_token", "").strip():
-        return auth["mcp_token"].strip()
+    saved_token = _clean_mcp_token((auth or {}).get("mcp_token", ""))
+    if saved_token:
+        return saved_token
 
     # 3. Interactive prompt
     if not sys.stdin.isatty():
@@ -572,7 +588,7 @@ def _ensure_mcp_token() -> str:
     console.print("    [accent]https://www.lennysdata.com/access/mcp?tab=claude-code[/accent]\n")
 
     while True:
-        token = Prompt.ask("  Enter your MCP token", password=True).strip()
+        token = _clean_mcp_token(Prompt.ask("  Enter your MCP token", password=True))
         if not token:
             console.print("  [warning]Token cannot be empty.[/warning]")
             continue

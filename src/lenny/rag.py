@@ -32,6 +32,11 @@ INSUFFICIENT_EVIDENCE = (
     "use `/mode research` for a deeper search that examines transcripts more thoroughly."
 )
 
+SEARCH_FAILED = (
+    "The transcript search encountered an error. Try again, or use "
+    "`/mode research` for a deeper analysis."
+)
+
 RAG_SYSTEM_PROMPT = textwrap.dedent("""\
 You are a research assistant specialized in Lenny's Podcast transcripts. \
 Answer the user's question using ONLY the provided transcript excerpts.
@@ -76,16 +81,18 @@ class RAGEngine:
         else:
             excerpts_text = None
 
-        # Relevance gate
-        if excerpts_text is None:
+        # Relevance gate: None = search errored, "" = search succeeded but empty
+        if excerpts_text is None or excerpts_text == "":
             elapsed = time.perf_counter() - start_time
             cost = make_query_cost_from_usage(
                 model=self.model,
                 input_tokens=0,
                 output_tokens=0,
                 execution_time=elapsed,
+                calls=0,
             )
-            return INSUFFICIENT_EVIDENCE, cost
+            message = SEARCH_FAILED if excerpts_text is None else INSUFFICIENT_EVIDENCE
+            return message, cost
 
         # Build the user prompt
         history_text = self._format_history(history)
@@ -125,13 +132,22 @@ class RAGEngine:
             results = self.mcp_client.search_content(
                 query=question, content_type="podcast", limit=20,
             )
-        except Exception as e:
-            logger.warning("MCP search failed: %s", e)
-            return None
+        except Exception:
+            logger.warning("MCP search failed, retrying with fresh session", exc_info=True)
+            try:
+                # Session may have expired — force re-init and retry once
+                self.mcp_client._session_id = None
+                results = self.mcp_client.search_content(
+                    query=question, content_type="podcast", limit=20,
+                )
+            except Exception as e:
+                logger.warning("MCP search retry failed: %s", e)
+                return None
 
         entries = results.get("results", [])
         if not entries:
-            return None
+            logger.info("MCP search returned 0 results for query: %s", question)
+            return ""  # empty string = search ran but found nothing
 
         # Flatten snippets from all results, with episode metadata
         all_snippets: list[dict] = []

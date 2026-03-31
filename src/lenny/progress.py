@@ -10,6 +10,7 @@ iteration_count) so it can be assigned to ``RLM.logger``.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -20,6 +21,8 @@ from rich.style import Style
 from rich.text import Text
 
 from rlm.core.types import RLMIteration, RLMMetadata
+
+logger = logging.getLogger(__name__)
 
 from lenny.style import (
     AMBER,
@@ -95,7 +98,10 @@ class ProgressDisplay:
 
     def __exit__(self, *args) -> None:
         if self._live is not None:
-            self._live.__exit__(*args)
+            try:
+                self._live.__exit__(*args)
+            except Exception:
+                pass
             self._live = None
 
     # ------------------------------------------------------------------
@@ -131,9 +137,25 @@ class ProgressDisplay:
         if self._live is not None:
             self._live.update(self._build_renderable())
 
+    def clear_iterations(self) -> None:
+        """Reset iteration state (called by some RLM library versions)."""
+        self._iteration_count = 0
+        self._completed_steps = []
+
     @property
     def iteration_count(self) -> int:
         return self._iteration_count
+
+    def __getattr__(self, name: str):
+        """Defensive fallback for unknown RLM logger methods.
+
+        The rlm library uses duck-typed loggers. If a future version adds
+        new callback methods, return a no-op rather than crashing.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
+        logger.debug("ProgressDisplay: unknown logger method %r called (no-op)", name)
+        return lambda *args, **kwargs: None
 
     # ------------------------------------------------------------------
     # Status extraction

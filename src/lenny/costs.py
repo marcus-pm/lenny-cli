@@ -80,6 +80,7 @@ def make_query_cost_from_usage(
     input_tokens: int,
     output_tokens: int,
     execution_time: float,
+    calls: int = 1,
 ) -> QueryCost:
     """Create a QueryCost from raw Anthropic API usage (for RAG path).
 
@@ -91,7 +92,7 @@ def make_query_cost_from_usage(
     output_cost = (output_tokens / 1_000_000) * pricing["output"]
     return QueryCost(
         model_costs={model: {
-            "calls": 1,
+            "calls": calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "input_cost": input_cost,
@@ -108,6 +109,9 @@ def format_query_cost(query: QueryCost) -> str:
     lines = []
     for model_name, costs in query.model_costs.items():
         short_name = _short_model_name(model_name)
+        if costs["calls"] == 0:
+            lines.append(f"  {short_name}: no API calls needed")
+            continue
         lines.append(
             f"  {short_name}: {costs['calls']} calls, "
             f"{costs['input_tokens']:,} in / {costs['output_tokens']:,} out tokens "

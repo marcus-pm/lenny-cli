@@ -742,13 +742,17 @@ class LennyEngine:
                 List of dicts with: guest, title, filename, snippets,
                 matched_terms, match_count.
             """
-            try:
-                result = mcp.search_content(
-                    query=query, content_type="podcast", limit=limit,
-                )
-                return result.get("results", [])
-            except Exception as e:
-                return [{"error": f"Search failed: {e}"}]
+            for attempt in range(2):
+                try:
+                    result = mcp.search_content(
+                        query=query, content_type="podcast", limit=limit,
+                    )
+                    return result.get("results", [])
+                except Exception as e:
+                    if attempt == 0:
+                        mcp._session_id = None
+                        continue
+                    return [{"error": f"Search failed: {e}"}]
 
         def fetch_transcript(slug: str) -> str:
             """Fetch and cache a full podcast transcript.
@@ -772,10 +776,15 @@ class LennyEngine:
             episode = index.episodes.get(slug)
             filename = episode.filename if episode else f"podcasts/{slug}.md"
 
-            try:
-                content = mcp.read_content(filename)
-            except Exception as e:
-                return f"Error fetching transcript for '{slug}': {e}"
+            for attempt in range(2):
+                try:
+                    content = mcp.read_content(filename)
+                    break
+                except Exception as e:
+                    if attempt == 0:
+                        mcp._session_id = None
+                        continue
+                    return f"Error fetching transcript for '{slug}': {e}"
 
             # Cache the raw content (with frontmatter)
             if cache is not None:
@@ -806,12 +815,16 @@ class LennyEngine:
             episode = index.episodes.get(slug)
             filename = episode.filename if episode else f"podcasts/{slug}.md"
 
-            try:
-                return mcp.read_excerpt(
-                    filename=filename, query=query, radius=radius,
-                )
-            except Exception as e:
-                return {"error": f"Excerpt retrieval failed: {e}"}
+            for attempt in range(2):
+                try:
+                    return mcp.read_excerpt(
+                        filename=filename, query=query, radius=radius,
+                    )
+                except Exception as e:
+                    if attempt == 0:
+                        mcp._session_id = None
+                        continue
+                    return {"error": f"Excerpt retrieval failed: {e}"}
 
         def _strip_frontmatter(content: str) -> str:
             """Strip YAML frontmatter from markdown content."""
